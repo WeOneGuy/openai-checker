@@ -7,6 +7,7 @@
 
   // ── Constants ────────────────────────────────────────────
   const API_URL = 'https://api.openai.com/v1/chat/completions';
+  const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/key';
   const REQUEST_TIMEOUT = 15000;
   const MAX_CONCURRENCY = 5;
   const STORAGE_KEY = 'oai-checker-keys';
@@ -28,7 +29,16 @@
   const KEY_PATTERNS = [
     /sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}/g,
     /sk-proj-[A-Za-z0-9\-_]{40,}/g,
+    /sk-or-[a-zA-Z0-9\-_]{20,}/g,
   ];
+
+  // ── Key Type Detection ──────────────────────────────────
+  function detectKeyType(key) {
+    if (key.startsWith('sk-or-')) return 'openrouter';
+    if (key.startsWith('sk-proj-') || /^sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}$/.test(key)) return 'openai';
+    if (key.startsWith('sk-')) return 'openai'; // default assumption
+    return 'openai';
+  }
 
   // ── State ────────────────────────────────────────────────
   const state = {
@@ -100,11 +110,16 @@
     const data = state.keys.map((k) => ({
       key: k.key,
       status: k.status,
+      type: k.type,
       tier: k.tier,
       rpm: k.rpm,
       tpm: k.tpm,
       rpmRemaining: k.rpmRemaining,
       tpmRemaining: k.tpmRemaining,
+      balance: k.balance,
+      balanceLimit: k.balanceLimit,
+      isFreeTier: k.isFreeTier,
+      usage: k.usage,
       responseTime: k.responseTime,
     }));
     localStorage.setItem(STORAGE_KEY, encrypt(JSON.stringify(data)));
@@ -121,11 +136,16 @@
       return data.map((k) => ({
         key: k.key || '',
         status: k.status || 'pending',
+        type: k.type || detectKeyType(k.key || ''),
         tier: k.tier || 'Unknown',
         rpm: k.rpm || 0,
         tpm: k.tpm || 0,
         rpmRemaining: k.rpmRemaining || 0,
         tpmRemaining: k.tpmRemaining || 0,
+        balance: k.balance !== undefined ? k.balance : null,
+        balanceLimit: k.balanceLimit !== undefined ? k.balanceLimit : null,
+        isFreeTier: k.isFreeTier || false,
+        usage: k.usage || 0,
         responseTime: k.responseTime || 0,
         headers: null,
         error: null,
@@ -203,9 +223,25 @@
     const entry = state.keys.find((k) => k.key === key);
     if (!entry) return;
 
+    entry.type = detectKeyType(key);
     entry.status = 'checking';
     renderKeyCard(entry);
 
+    if (entry.type === 'openrouter') {
+      await validateOpenRouterKey(key, entry);
+    } else {
+      await validateOpenAIKey(key, entry);
+    }
+
+    state.checkedCount++;
+    updateProgress();
+    renderKeyCard(entry);
+    updateStats();
+    saveKeys();
+  }
+
+  // ── OpenAI Key Validation ────────────────────────────────
+  async function validateOpenAIKey(key, entry) {
     const startTime = Date.now();
 
     try {
@@ -334,12 +370,125 @@
         entry.errorFull = err.stack || err.message || 'Network error';
       }
     }
+  }
 
-    state.checkedCount++;
-    updateProgress();
-    renderKeyCard(entry);
-    updateStats();
-    saveKeys();
+  // ── OpenRouter Key Validation ────────────────────────────
+  async function validateOpenRouterKey(key, entry) {
+    const startTime = Date.now();
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+      const response = await fetch(OPENROUTER_API_URL, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'HTTP-Referer': 'https://weoneguy.github.io/openai-checker',
+          'X-Title': 'AI Key Checker',
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
+
+      // Parse response headers
+      const headers = {};
+      const headerNames = [
+        'x-ratelimit-limit',
+        'x-ratelimit-remaining',
+        'x-ratelimit-reset',
+      ];
+      headerNames.forEach((h) => {
+        const val = response.headers.get(h);
+        if (val) headers[h] = val;
+      });
+
+      if (response.status === 200) {
+        const body = await response.json();
+        const data = body?.data || {};
+
+        entry.status = 'valid';
+        entry.type = 'openrouter';
+        entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
+          ? data.limit_remaining : null;
+        entry.balanceLimit = data.limit !== null && data.limit !== undefined
+          ? data.limit : null;
+        entry.isFreeTier = data.is_free_tier || false;
+        entry.usage = data.usage || 0;
+        entry.tier = data.is_free_tier ? 'Free' : 'Paid';
+        entry.rpm = parseInt(headers['x-ratelimit-limit'], 10) || 0;
+        entry.rpmRemaining = parseInt(headers['x-ratelimit-remaining'], 10) || 0;
+        entry.tpm = 0;
+        entry.tpmRemaining = 0;
+        entry.headers = headers;
+        entry.responseTime = responseTime;
+        entry.error = null;
+        entry.errorFull = null;
+
+        // Store full response data in headers for expandable details
+        if (data.label) headers['label'] = data.label;
+        if (data.limit !== null && data.limit !== undefined) headers['limit'] = String(data.limit);
+        if (data.limit_remaining !== null && data.limit_remaining !== undefined) headers['limit_remaining'] = String(data.limit_remaining);
+        if (data.usage !== null && data.usage !== undefined) headers['usage'] = String(data.usage);
+        if (data.is_free_tier !== undefined) headers['is_free_tier'] = String(data.is_free_tier);
+        if (data.rate_limit) {
+          if (data.rate_limit.requests) headers['rate_limit_requests'] = String(data.rate_limit.requests);
+          if (data.rate_limit.tokens) headers['rate_limit_tokens'] = String(data.rate_limit.tokens);
+        }
+      } else if (response.status === 401 || response.status === 403) {
+        entry.status = 'invalid';
+        entry.tier = 'Unknown';
+        entry.rpm = 0;
+        entry.tpm = 0;
+        entry.rpmRemaining = 0;
+        entry.tpmRemaining = 0;
+        entry.headers = headers;
+        entry.responseTime = responseTime;
+
+        try {
+          const body = await response.json();
+          const errMsg = body?.error?.message || body?.message || `HTTP ${response.status}`;
+          const errFull = JSON.stringify(body, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+        } catch {
+          entry.error = `HTTP ${response.status}`;
+          entry.errorFull = `HTTP ${response.status}`;
+        }
+      } else {
+        entry.status = 'error';
+        entry.responseTime = responseTime;
+        entry.headers = headers;
+
+        try {
+          const body = await response.json();
+          const errMsg = body?.error?.message || body?.message || `Unexpected HTTP ${response.status}`;
+          const errFull = JSON.stringify(body, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+        } catch {
+          entry.error = `Unexpected HTTP ${response.status}`;
+          entry.errorFull = `Unexpected HTTP ${response.status}`;
+        }
+      }
+    } catch (err) {
+      entry.responseTime = Date.now() - startTime;
+      if (err.name === 'AbortError') {
+        entry.status = 'error';
+        entry.error = 'Request timed out (15s)';
+        entry.errorFull = 'Request timed out (15s)';
+      } else if (err.message && err.message.includes('CORS')) {
+        entry.status = 'error';
+        entry.error = 'CORS blocked — browser cannot reach OpenRouter API directly';
+        entry.errorFull = 'CORS blocked — browser cannot reach OpenRouter API directly';
+      } else {
+        entry.status = 'error';
+        entry.error = err.message || 'Network error';
+        entry.errorFull = err.stack || err.message || 'Network error';
+      }
+    }
   }
 
   // ── Batch Validation with Concurrency ────────────────────
@@ -362,16 +511,47 @@
 
   // ── CORS Probe ───────────────────────────────────────────
   async function probeCORS() {
+    let openaiOk = false;
+    let openrouterOk = false;
+
+    // Probe OpenAI API
     try {
-      const response = await fetch(API_URL, {
+      await fetch(API_URL, {
         method: 'OPTIONS',
         headers: { 'Content-Type': 'application/json' },
       });
-      state.corsOk = true;
-      els.corsBanner.classList.add('hidden');
-    } catch (err) {
-      state.corsOk = false;
+      openaiOk = true;
+    } catch {}
+
+    // Probe OpenRouter API
+    try {
+      await fetch(OPENROUTER_API_URL, {
+        method: 'OPTIONS',
+        headers: {
+          'HTTP-Referer': 'https://weoneguy.github.io/openai-checker',
+          'X-Title': 'AI Key Checker',
+        },
+      });
+      openrouterOk = true;
+    } catch {}
+
+    state.corsOk = openaiOk || openrouterOk;
+
+    if (!openaiOk && !openrouterOk) {
+      // Both blocked
       els.corsBanner.classList.remove('hidden');
+      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Blocked</strong> — Your browser cannot reach the OpenAI or OpenRouter APIs directly. Key validation will fail. This may work in other browsers or with a proxy extension.';
+    } else if (!openaiOk) {
+      // Only OpenAI blocked
+      els.corsBanner.classList.remove('hidden');
+      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Partially Blocked</strong> — OpenAI API is blocked by CORS, but OpenRouter API is accessible. OpenAI key validation will fail; OpenRouter keys can still be checked.';
+    } else if (!openrouterOk) {
+      // Only OpenRouter blocked
+      els.corsBanner.classList.remove('hidden');
+      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Partially Blocked</strong> — OpenRouter API is blocked by CORS, but OpenAI API is accessible. OpenRouter key validation will fail; OpenAI keys can still be checked.';
+    } else {
+      // Both accessible
+      els.corsBanner.classList.add('hidden');
     }
   }
 
@@ -429,6 +609,10 @@
         html += `<span class="tier-count"><span class="dot ${dotClass}"></span>${t}: ${tiers[t]}</span>`;
       }
     });
+    // Add Paid tier for OpenRouter
+    if (tiers['Paid']) {
+      html += `<span class="tier-count"><span class="dot paid"></span>Paid: ${tiers['Paid']}</span>`;
+    }
     els.tierDistribution.innerHTML = html;
   }
 
@@ -442,6 +626,7 @@
     card.className = `key-card ${entry.status}`;
     card.setAttribute('data-tier', entry.tier || '');
     card.setAttribute('data-status', entry.status);
+    card.setAttribute('data-type', entry.type || 'openai');
     card.setAttribute('data-rpm', entry.rpm || 0);
     card.setAttribute('data-tpm', entry.tpm || 0);
 
@@ -476,6 +661,7 @@
       card.className = `key-card ${entry.status}`;
       card.setAttribute('data-tier', entry.tier || '');
       card.setAttribute('data-status', entry.status);
+      card.setAttribute('data-type', entry.type || 'openai');
       card.setAttribute('data-rpm', entry.rpm || 0);
       card.setAttribute('data-tpm', entry.tpm || 0);
       card.style.animationDelay = `${idx * 60}ms`;
@@ -497,6 +683,12 @@
     };
 
     const masked = entry.revealed ? entry.key : maskKey(entry.key);
+
+    // Type badge
+    const typeBadgeHtml = entry.type
+      ? `<span class="type-badge ${entry.type}">${entry.type === 'openrouter' ? 'OpenRouter' : 'OpenAI'}</span>`
+      : '';
+
     const tierBadge = entry.tier && entry.tier !== 'Unknown'
       ? `<span class="tier-badge ${tierBadgeClass(entry.tier)}">${entry.tier}</span>`
       : '';
@@ -514,27 +706,54 @@
       ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
       : '';
 
-    const limitsHtml = (entry.rpm || entry.tpm)
-      ? `<div class="limits">
-          <div class="limit-item">
-            <span class="limit-value">${formatNum(entry.rpm)}</span>
-            <span class="limit-label">RPM</span>
-          </div>
-          <div class="limit-item">
-            <span class="limit-value">${formatNum(entry.tpm)}</span>
-            <span class="limit-label">TPM</span>
-          </div>
-          <div class="limit-item">
-            <span class="limit-value">${formatNum(entry.rpmRemaining)}</span>
-            <span class="limit-label">Rem Req</span>
-          </div>
-          <div class="limit-item">
-            <span class="limit-value">${formatNum(entry.tpmRemaining)}</span>
-            <span class="limit-label">Rem Tok</span>
-          </div>
-          ${timeHtml}
-        </div>`
-      : timeHtml ? `<div class="limits">${timeHtml}</div>` : '';
+    // Balance display for OpenRouter keys
+    let balanceHtml = '';
+    if (entry.type === 'openrouter' && entry.balance !== null && entry.balance !== undefined) {
+      const balStr = entry.balanceLimit !== null && entry.balanceLimit !== undefined
+        ? `$${formatBalance(entry.balance)} / $${formatBalance(entry.balanceLimit)}`
+        : `$${formatBalance(entry.balance)}`;
+      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">${balStr}</span><span class="limit-label">Balance</span></div>`;
+    } else if (entry.type === 'openrouter' && entry.balance === null && entry.status === 'valid') {
+      // null limit_remaining means unlimited
+      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">∞</span><span class="limit-label">Balance</span></div>`;
+    }
+
+    // Limits: for OpenRouter show balance + RPM, for OpenAI show RPM/TPM/Rem
+    let limitsHtml = '';
+    if (entry.type === 'openrouter') {
+      const rpmHtml = entry.rpm
+        ? `<div class="limit-item"><span class="limit-value">${formatNum(entry.rpm)}</span><span class="limit-label">RPM</span></div>`
+        : '';
+      const rpmRemHtml = entry.rpmRemaining
+        ? `<div class="limit-item"><span class="limit-value">${formatNum(entry.rpmRemaining)}</span><span class="limit-label">Rem Req</span></div>`
+        : '';
+      const limitItems = [balanceHtml, rpmHtml, rpmRemHtml, timeHtml].filter(Boolean);
+      if (limitItems.length) {
+        limitsHtml = `<div class="limits">${limitItems.join('')}</div>`;
+      }
+    } else {
+      limitsHtml = (entry.rpm || entry.tpm)
+        ? `<div class="limits">
+            <div class="limit-item">
+              <span class="limit-value">${formatNum(entry.rpm)}</span>
+              <span class="limit-label">RPM</span>
+            </div>
+            <div class="limit-item">
+              <span class="limit-value">${formatNum(entry.tpm)}</span>
+              <span class="limit-label">TPM</span>
+            </div>
+            <div class="limit-item">
+              <span class="limit-value">${formatNum(entry.rpmRemaining)}</span>
+              <span class="limit-label">Rem Req</span>
+            </div>
+            <div class="limit-item">
+              <span class="limit-value">${formatNum(entry.tpmRemaining)}</span>
+              <span class="limit-label">Rem Tok</span>
+            </div>
+            ${timeHtml}
+          </div>`
+        : timeHtml ? `<div class="limits">${timeHtml}</div>` : '';
+    }
 
     const errorTooltip = entry.errorFull ? ` title="${entry.errorFull.replace(/"/g, '&quot;')}"` : '';
     const errorHtml = entry.error
@@ -554,6 +773,7 @@
       <div class="status-icon">${statusIcons[entry.status] || '·'}</div>
       <span class="key-text ${entry.revealed ? 'revealed' : ''}">${masked}</span>
       ${statusLabelHtml}
+      ${typeBadgeHtml}
       ${tierBadge}
       ${limitsHtml}
       <div class="card-actions">
@@ -606,6 +826,8 @@
     if (state.filterBy === 'all') return [...state.keys];
     if (state.filterBy === 'valid') return state.keys.filter((k) => k.status === 'valid' || k.status === 'rate-limited');
     if (state.filterBy === 'invalid') return state.keys.filter((k) => k.status === 'invalid' || k.status === 'error');
+    if (state.filterBy === 'openai') return state.keys.filter((k) => k.type === 'openai');
+    if (state.filterBy === 'openrouter') return state.keys.filter((k) => k.type === 'openrouter');
     if (state.filterBy.startsWith('tier-')) {
       const tierName = state.filterBy === 'tier-Free' ? 'Free' : `Tier ${state.filterBy.replace('tier-', '')}`;
       return state.keys.filter((k) => k.tier === tierName);
@@ -634,6 +856,12 @@
         break;
       case 'tpm':
         sorted.sort((a, b) => (b.tpm || 0) - (a.tpm || 0));
+        break;
+      case 'type':
+        sorted.sort((a, b) => {
+          const typeOrder = { openai: 0, openrouter: 1 };
+          return (typeOrder[a.type] || 9) - (typeOrder[b.type] || 9);
+        });
         break;
     }
     return sorted;
@@ -669,6 +897,15 @@
       return formatted + 'K';
     }
     return n.toString();
+  }
+
+  // ── Format Balance (USD) ─────────────────────────────────
+  function formatBalance(n) {
+    if (n === null || n === undefined) return '—';
+    if (n === 0) return '0.00';
+    // Show up to 2 decimal places, strip trailing zeros after 2
+    const fixed = n.toFixed(2);
+    return fixed;
   }
 
   // ── Handle Check ─────────────────────────────────────────
@@ -708,11 +945,16 @@
       state.keys.push({
         key: k,
         status: 'pending',
+        type: detectKeyType(k),
         tier: 'Unknown',
         rpm: 0,
         tpm: 0,
         rpmRemaining: 0,
         tpmRemaining: 0,
+        balance: null,
+        balanceLimit: null,
+        isFreeTier: false,
+        usage: 0,
         responseTime: 0,
         headers: null,
         error: null,
