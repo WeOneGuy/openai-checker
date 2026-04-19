@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Check OpenAI API keys — validate, infer tier level, view rate limits. Paste bulk text or single keys.">
+  <meta name="theme-color" content="#0a0a0b">
+
+  <!-- Favicon: inline SVG -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔑</text></svg>">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <title>OpenAI Key Checker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Animated background mesh -->
+  <div class="bg-mesh" aria-hidden="true"></div>
+
+  <div class="app-container">
+
+    <!-- Header -->
+    <header class="app-header">
+      <h1>OpenAI <span class="accent">Key Checker</span></h1>
+      <p>Validate API keys, infer account tier, and inspect rate limits. Paste bulk text or enter a single key.</p>
+    </header>
+
+    <!-- CORS Warning Banner -->
+    <div id="cors-banner" class="cors-banner hidden" role="alert">
+      <span class="icon">⚠</span>
+      <span class="text"><strong>CORS Blocked</strong> — Your browser cannot reach the OpenAI API directly. Key validation will fail. This may work in other browsers or with a proxy extension.</span>
+    </div>
+
+    <!-- Input Section -->
+    <section class="glass-card input-section">
+      <label for="bulk-input">
+        Bulk Text Input
+        <span class="tag">auto-extract</span>
+      </label>
+      <textarea
+        id="bulk-input"
+        class="key-input"
+        placeholder="Paste text containing OpenAI API keys (sk-... or sk-proj-...) — keys will be auto-extracted"
+        spellcheck="false"
+        autocomplete="off"
+      ></textarea>
+
+      <label for="single-input">Single Key</label>
+      <div class="single-key-input">
+        <input
+          id="single-input"
+          type="text"
+          placeholder="sk-... or sk-proj-..."
+          spellcheck="false"
+          autocomplete="off"
+        >
+        <button id="check-btn" class="btn">
+          <span class="spinner"></span>
+          <span class="btn-text">Check Keys</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Progress -->
+    <div id="progress-section" class="hidden">
+      <div class="progress-bar">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <section id="stats-bar" class="stats-bar hidden">
+      <div class="stat-item">
+        <span id="stat-total" class="stat-value">0</span>
+        <span class="stat-label">Total Keys</span>
+      </div>
+      <div class="stat-item">
+        <span id="stat-valid" class="stat-value valid">0</span>
+        <span class="stat-label">Valid</span>
+      </div>
+      <div class="stat-item">
+        <span id="stat-invalid" class="stat-value invalid">0</span>
+        <span class="stat-label">Invalid</span>
+      </div>
+      <div id="tier-distribution" class="tier-distribution">
+        <!-- Tier counts injected by JS -->
+      </div>
+    </section>
+
+    <!-- Controls -->
+    <section class="controls-bar" id="controls-section" style="display:none;">
+      <div class="group">
+        <span class="group-label">Sort</span>
+        <button class="btn-ghost active" data-sort="tier">Tier</button>
+        <button class="btn-ghost" data-sort="status">Status</button>
+        <button class="btn-ghost" data-sort="rpm">RPM</button>
+        <button class="btn-ghost" data-sort="tpm">TPM</button>
+      </div>
+      <div class="group">
+        <span class="group-label">Filter</span>
+        <button class="btn-ghost active" data-filter="all">All</button>
+        <button class="btn-ghost" data-filter="valid">Valid</button>
+        <button class="btn-ghost" data-filter="invalid">Invalid</button>
+      </div>
+      <div class="group" style="margin-left:auto;">
+        <button id="copy-all-btn" class="btn-ghost">Copy All Valid Keys</button>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="results-section">
+      <div id="results-list" class="results-list"></div>
+      <div id="empty-state" class="empty-state">
+        <div class="icon">🔑</div>
+        <p>Paste text containing OpenAI API keys above, then click Check Keys.</p>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>OpenAI Key Checker — static site, no backend, no tracking. Keys are validated directly against the OpenAI API from your browser.</p>
+    </footer>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
