@@ -47,7 +47,7 @@
     checking: false,
     checkedCount: 0,
     totalCount: 0,
-    sortBy: 'tier',
+    sortBy: 'smart', // smart = valid first, then by tier/balance
     filterBy: 'all',
   };
 
@@ -706,13 +706,22 @@
       ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
       : '';
 
-    // Balance display for OpenRouter keys
+    // Balance display for OpenRouter keys — show remaining, limit, and usage
     let balanceHtml = '';
     if (entry.type === 'openrouter' && entry.balance !== null && entry.balance !== undefined) {
-      const balStr = entry.balanceLimit !== null && entry.balanceLimit !== undefined
-        ? `$${formatBalance(entry.balance)} / $${formatBalance(entry.balanceLimit)}`
-        : `$${formatBalance(entry.balance)}`;
-      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">${balStr}</span><span class="limit-label">Balance</span></div>`;
+      const remaining = formatBalance(entry.balance);
+      const limitStr = entry.balanceLimit !== null && entry.balanceLimit !== undefined
+        ? formatBalance(entry.balanceLimit)
+        : null;
+      const usageStr = entry.usage ? formatBalance(entry.usage) : null;
+
+      // Show: remaining / limit (used: $X.XX)
+      let balDisplay = `$${remaining}`;
+      if (limitStr) balDisplay += ` / $${limitStr}`;
+      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">${balDisplay}</span><span class="limit-label">Balance</span></div>`;
+      if (usageStr) {
+        balanceHtml += `<div class="limit-item"><span class="limit-value">$${usageStr}</span><span class="limit-label">Used</span></div>`;
+      }
     } else if (entry.type === 'openrouter' && entry.balance === null && entry.status === 'valid') {
       // null limit_remaining means unlimited
       balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">∞</span><span class="limit-label">Balance</span></div>`;
@@ -838,6 +847,42 @@
   function getSortedKeys(keys) {
     const sorted = [...keys];
     switch (state.sortBy) {
+      case 'smart':
+        // Valid keys first (regardless of type), then invalid/error
+        // Within valid: OpenRouter keys sorted by balance desc, OpenAI by tier
+        // Within invalid: no special ordering
+        sorted.sort((a, b) => {
+          // 1. Status priority: valid/rate-limited > pending > checking > invalid > error
+          const statusPriority = { valid: 0, 'rate-limited': 0, pending: 1, checking: 2, invalid: 3, error: 4 };
+          const aP = statusPriority[a.status] || 9;
+          const bP = statusPriority[b.status] || 9;
+          if (aP !== bP) return aP - bP;
+
+          // 2. Within valid keys: sort by balance (OpenRouter) or tier level (OpenAI)
+          // Higher balance / higher tier = better, so sort descending
+          if (a.status === 'valid' || a.status === 'rate-limited') {
+            // OpenRouter: sort by balance descending (more money = higher)
+            if (a.type === 'openrouter' && b.type === 'openrouter') {
+              const aBal = a.balance || 0;
+              const bBal = b.balance || 0;
+              return bBal - aBal;
+            }
+            // OpenAI: sort by tier level (higher tier = higher priority)
+            if (a.type === 'openai' && b.type === 'openai') {
+              const aL = TIER_ORDER.indexOf(a.tier);
+              const bL = TIER_ORDER.indexOf(b.tier);
+              const aIdx = aL === -1 ? 999 : aL;
+              const bIdx = bL === -1 ? 999 : bL;
+              return aIdx - bIdx;
+            }
+            // Mixed: OpenRouter valid > OpenAI valid (OpenRouter has balance, more useful)
+            const typePriority = { openrouter: 0, openai: 1 };
+            return (typePriority[a.type] || 9) - (typePriority[b.type] || 9);
+          }
+
+          return 0;
+        });
+        break;
       case 'tier':
         sorted.sort((a, b) => {
           const aL = TIER_ORDER.indexOf(a.tier);
@@ -859,7 +904,7 @@
         break;
       case 'type':
         sorted.sort((a, b) => {
-          const typeOrder = { openai: 0, openrouter: 1 };
+          const typeOrder = { openrouter: 0, openai: 1 };
           return (typeOrder[a.type] || 9) - (typeOrder[b.type] || 9);
         });
         break;
