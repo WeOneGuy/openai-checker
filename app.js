@@ -218,7 +218,7 @@
         body: JSON.stringify({
           model: 'gpt-5.4-nano',
           messages: [{ role: 'user', content: 'Hi' }],
-          max_completion_tokens: 1,
+          max_completion_tokens: 16,
         }),
         signal: controller.signal,
       });
