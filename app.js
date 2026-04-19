@@ -706,22 +706,18 @@
       ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
       : '';
 
-    // Balance display for OpenRouter keys — show remaining, limit, and usage
+    // Balance display for OpenRouter keys — show remaining balance and total limit
     let balanceHtml = '';
     if (entry.type === 'openrouter' && entry.balance !== null && entry.balance !== undefined) {
       const remaining = formatBalance(entry.balance);
       const limitStr = entry.balanceLimit !== null && entry.balanceLimit !== undefined
         ? formatBalance(entry.balanceLimit)
         : null;
-      const usageStr = entry.usage ? formatBalance(entry.usage) : null;
 
-      // Show: remaining / limit (used: $X.XX)
+      // Show: $remaining / $limit (this IS the balance)
       let balDisplay = `$${remaining}`;
       if (limitStr) balDisplay += ` / $${limitStr}`;
       balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">${balDisplay}</span><span class="limit-label">Balance</span></div>`;
-      if (usageStr) {
-        balanceHtml += `<div class="limit-item"><span class="limit-value">$${usageStr}</span><span class="limit-label">Used</span></div>`;
-      }
     } else if (entry.type === 'openrouter' && entry.balance === null && entry.status === 'valid') {
       // null limit_remaining means unlimited
       balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">∞</span><span class="limit-label">Balance</span></div>`;
