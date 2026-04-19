@@ -204,6 +204,35 @@ body {
   margin: 0 auto;
 }
 
+/* ── Extraction Banner ───────────────────────────────────── */
+.extract-banner {
+  background: var(--color-info-soft);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  animation: bannerSlideIn var(--transition-default) both;
+}
+
+.extract-banner.hidden {
+  display: none;
+}
+
+.extract-banner .extract-count {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: var(--text-lg);
+}
+
+.extract-banner .extract-new {
+  font-weight: 600;
+  color: var(--accent-tertiary);
+}
+
 /* ── CORS Banner ────────────────────────────────────────── */
 .cors-banner {
   background: var(--color-warning-soft);
@@ -643,6 +672,35 @@ textarea.key-input::placeholder {
   border-radius: var(--radius-full);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.key-card .status-label {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.key-card .rate-limited-label {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.key-card .invalid-label {
+  color: var(--color-invalid);
+  background: var(--color-invalid-soft);
+}
+
+.key-card .error-label {
+  color: var(--color-invalid);
+  background: var(--color-invalid-soft);
+}
+
+.key-card .checking-label {
+  color: var(--color-info);
+  background: var(--color-info-soft);
 }
 
 .tier-badge.tier-free { background: rgba(107, 114, 128, 0.2); color: #9ca3af; border: 1px solid rgba(107, 114, 128, 0.3); }

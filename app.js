@@ -52,6 +52,9 @@
       bulkInput: $('#bulk-input'),
       checkBtn: $('#check-btn'),
       corsBanner: $('#cors-banner'),
+      extractBanner: $('#extract-banner'),
+      extractCount: $('#extract-count'),
+      extractNew: $('#extract-new'),
       progressFill: $('#progress-fill'),
       progressSection: $('#progress-section'),
       resultsList: $('#results-list'),
@@ -274,8 +277,11 @@
         entry.tpmRemaining = tpmRemaining;
         entry.headers = headers;
         entry.responseTime = responseTime;
-        entry.error = null;
-        entry.errorFull = null;
+        // If headers didn't come, still show useful info
+        if (!rpm && !tpm) {
+          entry.error = 'Rate limited — key is valid but too many requests. Tier info unavailable from headers.';
+          entry.errorFull = 'HTTP 429 Too Many Requests. The key works but rate limit headers were not returned in this response. Try again later to get tier data.';
+        }
       } else if (response.status === 401 || response.status === 403) {
         entry.status = 'invalid';
         entry.tier = 'Unknown';
@@ -495,6 +501,15 @@
       ? `<span class="tier-badge ${tierBadgeClass(entry.tier)}">${entry.tier}</span>`
       : '';
 
+    // Status label for non-valid keys
+    const statusLabels = {
+      'rate-limited': '<span class="status-label rate-limited-label">Rate Limited</span>',
+      'invalid': '<span class="status-label invalid-label">Invalid</span>',
+      'error': '<span class="status-label error-label">Error</span>',
+      'checking': '<span class="status-label checking-label">Checking...</span>',
+    };
+    const statusLabelHtml = statusLabels[entry.status] || '';
+
     const timeHtml = entry.responseTime
       ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
       : '';
@@ -538,6 +553,7 @@
     card.innerHTML = `
       <div class="status-icon">${statusIcons[entry.status] || '·'}</div>
       <span class="key-text ${entry.revealed ? 'revealed' : ''}">${masked}</span>
+      ${statusLabelHtml}
       ${tierBadge}
       ${limitsHtml}
       <div class="card-actions">
@@ -670,12 +686,23 @@
       els.emptyState.classList.remove('hidden');
       els.emptyState.querySelector('p').textContent = 'No API keys found. Paste text containing keys above.';
       els.resultsList.innerHTML = '';
+      els.extractBanner.classList.add('hidden');
       return;
     }
 
-    // Merge with existing keys (don't re-check already validated ones)
+    // Show extraction count
     const existingKeys = new Set(state.keys.map((k) => k.key));
     const newKeys = keys.filter((k) => !existingKeys.has(k));
+    const skipped = keys.length - newKeys.length;
+
+    els.extractCount.textContent = keys.length;
+    els.extractNew.textContent = newKeys.length;
+    els.extractBanner.classList.remove('hidden');
+
+    // Update banner text for duplicates
+    if (skipped > 0) {
+      els.extractBanner.innerHTML = `<span class="extract-count">${keys.length}</span> keys found · <span class="extract-new">${newKeys.length}</span> new · ${skipped} already checked`;
+    }
 
     newKeys.forEach((k) => {
       state.keys.push({
