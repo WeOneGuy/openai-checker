@@ -7,8 +7,10 @@
 
   // ── Constants ────────────────────────────────────────────
   const API_URL = 'https://api.openai.com/v1/chat/completions';
-  const REQUEST_TIMEOUT = 15000; // 15s per key
+  const REQUEST_TIMEOUT = 15000;
   const MAX_CONCURRENCY = 5;
+  const STORAGE_KEY = 'oai-checker-keys';
+  const CRYPTO_PASS = 'oai-kc-2026-x9f';
 
   // gpt-5.4-nano specific TPM thresholds
   const TIER_MAP = {
@@ -30,13 +32,13 @@
 
   // ── State ────────────────────────────────────────────────
   const state = {
-    keys: [],          // { key, status, tier, rpm, tpm, rpmRemaining, tpmRemaining, headers, error, expanded, revealed }
-    corsOk: null,      // null = unchecked, true/false
+    keys: [],
+    corsOk: null,
     checking: false,
     checkedCount: 0,
     totalCount: 0,
-    sortBy: 'tier',    // tier, status, rpm, tm
-    filterBy: 'all',   // all, valid, invalid, tier-X
+    sortBy: 'tier',
+    filterBy: 'all',
   };
 
   // ── DOM References ───────────────────────────────────────
@@ -48,7 +50,6 @@
   function cacheEls() {
     els = {
       bulkInput: $('#bulk-input'),
-      singleInput: $('#single-input'),
       checkBtn: $('#check-btn'),
       corsBanner: $('#cors-banner'),
       progressFill: $('#progress-fill'),
@@ -67,11 +68,81 @@
     };
   }
 
+  // ── Encryption (AES-like XOR + base64 for localStorage) ──
+  function encrypt(text) {
+    const pass = CRYPTO_PASS;
+    let result = '';
+    for (let i = 0; i < text.length; i++) {
+      result += String.fromCharCode(text.charCodeAt(i) ^ pass.charCodeAt(i % pass.length));
+    }
+    return btoa(unescape(encodeURIComponent(result)));
+  }
+
+  function decrypt(encoded) {
+    try {
+      const decoded = decodeURIComponent(escape(atob(encoded)));
+      const pass = CRYPTO_PASS;
+      let result = '';
+      for (let i = 0; i < decoded.length; i++) {
+        result += String.fromCharCode(decoded.charCodeAt(i) ^ pass.charCodeAt(i % pass.length));
+      }
+      return result;
+    } catch {
+      return '';
+    }
+  }
+
+  // ── LocalStorage (encrypted) ─────────────────────────────
+  function saveKeys() {
+    const data = state.keys.map((k) => ({
+      key: k.key,
+      status: k.status,
+      tier: k.tier,
+      rpm: k.rpm,
+      tpm: k.tpm,
+      rpmRemaining: k.rpmRemaining,
+      tpmRemaining: k.tpmRemaining,
+      responseTime: k.responseTime,
+    }));
+    localStorage.setItem(STORAGE_KEY, encrypt(JSON.stringify(data)));
+  }
+
+  function loadKeys() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const decrypted = decrypt(raw);
+    if (!decrypted) return [];
+    try {
+      const data = JSON.parse(decrypted);
+      if (!Array.isArray(data)) return [];
+      return data.map((k) => ({
+        key: k.key || '',
+        status: k.status || 'pending',
+        tier: k.tier || 'Unknown',
+        rpm: k.rpm || 0,
+        tpm: k.tpm || 0,
+        rpmRemaining: k.rpmRemaining || 0,
+        tpmRemaining: k.tpmRemaining || 0,
+        responseTime: k.responseTime || 0,
+        headers: null,
+        error: null,
+        errorFull: null,
+        expanded: false,
+        revealed: false,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  function clearStorage() {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+
   // ── Key Extraction ───────────────────────────────────────
   function extractKeys(text) {
     const found = new Set();
     KEY_PATTERNS.forEach((pattern) => {
-      // Reset regex state for global patterns
       pattern.lastIndex = 0;
       const matches = text.matchAll(pattern);
       for (const m of matches) {
@@ -91,13 +162,11 @@
   function inferTier(tpm) {
     if (!tpm || tpm <= 0) return { tier: 'Unknown', rpm: 0, level: -1 };
 
-    // Find exact match first
     if (TIER_MAP[tpm]) {
       const t = TIER_MAP[tpm];
       return { ...t, level: TIER_ORDER.indexOf(t.tier) };
     }
 
-    // Find closest lower tier
     const thresholds = Object.keys(TIER_MAP).map(Number).sort((a, b) => a - b);
     let best = null;
     for (const t of thresholds) {
@@ -134,6 +203,8 @@
     entry.status = 'checking';
     renderKeyCard(entry);
 
+    const startTime = Date.now();
+
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
@@ -147,12 +218,13 @@
         body: JSON.stringify({
           model: 'gpt-5.4-nano',
           messages: [{ role: 'user', content: 'Hi' }],
-          max_tokens: 1,
+          max_completion_tokens: 1,
         }),
         signal: controller.signal,
       });
 
       clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
 
       // Parse rate limit headers
       const headers = {};
@@ -190,9 +262,10 @@
         entry.rpmRemaining = rpmRemaining;
         entry.tpmRemaining = tpmRemaining;
         entry.headers = headers;
+        entry.responseTime = responseTime;
         entry.error = null;
+        entry.errorFull = null;
       } else if (response.status === 429) {
-        // Rate limited = key is valid but throttled
         entry.status = 'rate-limited';
         entry.tier = tierInfo.tier;
         entry.rpm = rpm;
@@ -200,7 +273,9 @@
         entry.rpmRemaining = rpmRemaining;
         entry.tpmRemaining = tpmRemaining;
         entry.headers = headers;
+        entry.responseTime = responseTime;
         entry.error = null;
+        entry.errorFull = null;
       } else if (response.status === 401 || response.status === 403) {
         entry.status = 'invalid';
         entry.tier = 'Unknown';
@@ -209,29 +284,48 @@
         entry.rpmRemaining = 0;
         entry.tpmRemaining = 0;
         entry.headers = headers;
+        entry.responseTime = responseTime;
 
-        // Try to parse error message
         try {
           const body = await response.json();
-          entry.error = body?.error?.message || `HTTP ${response.status}`;
+          const errMsg = body?.error?.message || `HTTP ${response.status}`;
+          const errFull = JSON.stringify(body, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
         } catch {
           entry.error = `HTTP ${response.status}`;
+          entry.errorFull = `HTTP ${response.status}`;
         }
       } else {
         entry.status = 'error';
-        entry.error = `Unexpected HTTP ${response.status}`;
+        entry.responseTime = responseTime;
         entry.headers = headers;
+
+        try {
+          const body = await response.json();
+          const errMsg = body?.error?.message || `Unexpected HTTP ${response.status}`;
+          const errFull = JSON.stringify(body, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+        } catch {
+          entry.error = `Unexpected HTTP ${response.status}`;
+          entry.errorFull = `Unexpected HTTP ${response.status}`;
+        }
       }
     } catch (err) {
+      entry.responseTime = Date.now() - startTime;
       if (err.name === 'AbortError') {
         entry.status = 'error';
         entry.error = 'Request timed out (15s)';
+        entry.errorFull = 'Request timed out (15s)';
       } else if (err.message && err.message.includes('CORS')) {
         entry.status = 'error';
         entry.error = 'CORS blocked — browser cannot reach OpenAI API directly';
+        entry.errorFull = 'CORS blocked — browser cannot reach OpenAI API directly';
       } else {
         entry.status = 'error';
         entry.error = err.message || 'Network error';
+        entry.errorFull = err.stack || err.message || 'Network error';
       }
     }
 
@@ -239,6 +333,7 @@
     updateProgress();
     renderKeyCard(entry);
     updateStats();
+    saveKeys();
   }
 
   // ── Batch Validation with Concurrency ────────────────────
@@ -249,7 +344,6 @@
     updateProgress();
     setCheckBtnLoading(true);
 
-    // Process in chunks of MAX_CONCURRENCY
     for (let i = 0; i < keys.length; i += MAX_CONCURRENCY) {
       const chunk = keys.slice(i, i + MAX_CONCURRENCY);
       await Promise.all(chunk.map((k) => validateKey(k)));
@@ -257,6 +351,7 @@
 
     state.checking = false;
     setCheckBtnLoading(false);
+    saveKeys();
   }
 
   // ── CORS Probe ───────────────────────────────────────────
@@ -266,7 +361,6 @@
         method: 'OPTIONS',
         headers: { 'Content-Type': 'application/json' },
       });
-      // If we get any response (even 403), CORS is working
       state.corsOk = true;
       els.corsBanner.classList.add('hidden');
     } catch (err) {
@@ -315,7 +409,6 @@
     els.validStat.textContent = valid;
     els.invalidStat.textContent = invalid;
 
-    // Tier distribution
     const tiers = {};
     state.keys.forEach((k) => {
       if (k.tier && k.tier !== 'Unknown') {
@@ -333,7 +426,7 @@
     els.tierDistribution.innerHTML = html;
   }
 
-  // ── UI: Render Key Card (update existing or create new) ───
+  // ── UI: Render Key Card ──────────────────────────────────
   function renderKeyCard(entry) {
     const cardId = `key-${entry.key.slice(0, 12)}`;
     const existing = document.getElementById(cardId);
@@ -346,7 +439,6 @@
     card.setAttribute('data-rpm', entry.rpm || 0);
     card.setAttribute('data-tpm', entry.tpm || 0);
 
-    // Stagger animation delay only on first render
     if (!existing) {
       const idx = state.keys.indexOf(entry);
       card.style.animationDelay = `${idx * 60}ms`;
@@ -403,6 +495,10 @@
       ? `<span class="tier-badge ${tierBadgeClass(entry.tier)}">${entry.tier}</span>`
       : '';
 
+    const timeHtml = entry.responseTime
+      ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
+      : '';
+
     const limitsHtml = (entry.rpm || entry.tpm)
       ? `<div class="limits">
           <div class="limit-item">
@@ -421,12 +517,18 @@
             <span class="limit-value">${formatNum(entry.tpmRemaining)}</span>
             <span class="limit-label">Rem Tok</span>
           </div>
+          ${timeHtml}
         </div>`
+      : timeHtml ? `<div class="limits">${timeHtml}</div>` : '';
+
+    const errorTooltip = entry.errorFull ? ` title="${entry.errorFull.replace(/"/g, '&quot;')}"` : '';
+    const errorHtml = entry.error
+      ? `<div class="error-message"${errorTooltip}>${entry.error}${entry.errorFull ? '<span class="error-expand-hint">hover for details</span>' : ''}</div>`
       : '';
 
     const detailsHtml = (entry.headers || entry.error)
       ? `<div class="card-details">
-          ${entry.error ? `<div class="error-message">${entry.error}</div>` : ''}
+          ${errorHtml}
           ${entry.headers ? `<div class="detail-grid">${Object.entries(entry.headers).map(([k, v]) =>
             `<div class="detail-item"><span class="detail-label">${k}</span><span class="detail-value">${v}</span></div>`
           ).join('')}</div>` : ''}
@@ -441,6 +543,7 @@
       <div class="card-actions">
         <button class="btn-icon" data-action="reveal" title="Toggle key visibility" aria-label="Toggle key visibility">👁</button>
         <button class="btn-icon" data-action="copy" title="Copy key" aria-label="Copy key">📋</button>
+        <button class="btn-icon" data-action="delete" title="Remove key" aria-label="Remove key">🗑</button>
       </div>
       ${detailsHtml}
     `;
@@ -468,6 +571,15 @@
           copyToClipboard(entry.key);
           btn.textContent = '✓';
           setTimeout(() => { btn.textContent = '📋'; }, 1500);
+        } else if (action === 'delete') {
+          state.keys = state.keys.filter((k) => k.key !== entry.key);
+          card.remove();
+          updateStats();
+          saveKeys();
+          if (state.keys.length === 0) {
+            els.emptyState.classList.remove('hidden');
+            els.emptyState.querySelector('p').textContent = 'No API keys found. Paste text containing keys above.';
+          }
         }
       });
     });
@@ -478,7 +590,6 @@
     if (state.filterBy === 'all') return [...state.keys];
     if (state.filterBy === 'valid') return state.keys.filter((k) => k.status === 'valid' || k.status === 'rate-limited');
     if (state.filterBy === 'invalid') return state.keys.filter((k) => k.status === 'invalid' || k.status === 'error');
-    // Tier filter: "tier-Free", "tier-1", etc.
     if (state.filterBy.startsWith('tier-')) {
       const tierName = state.filterBy === 'tier-Free' ? 'Free' : `Tier ${state.filterBy.replace('tier-', '')}`;
       return state.keys.filter((k) => k.tier === tierName);
@@ -493,7 +604,6 @@
         sorted.sort((a, b) => {
           const aL = TIER_ORDER.indexOf(a.tier);
           const bL = TIER_ORDER.indexOf(b.tier);
-          // Unknown goes last
           const aIdx = aL === -1 ? 999 : aL;
           const bIdx = bL === -1 ? 999 : bL;
           return aIdx - bIdx;
@@ -518,7 +628,6 @@
     try {
       await navigator.clipboard.writeText(text);
     } catch {
-      // Fallback
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
@@ -549,56 +658,52 @@
   // ── Handle Check ─────────────────────────────────────────
   async function handleCheck() {
     const bulkText = els.bulkInput.value.trim();
-    const singleKey = els.singleInput.value.trim();
 
-    // Extract keys
     let keys = [];
     if (bulkText) {
       keys = extractKeys(bulkText);
     }
-    if (singleKey) {
-      // Validate single key format loosely
-      if (singleKey.startsWith('sk-')) {
-        keys.push(singleKey);
-      }
-    }
 
-    // Deduplicate
     keys = [...new Set(keys)];
 
     if (keys.length === 0) {
-      // Show inline message
       els.emptyState.classList.remove('hidden');
-      els.emptyState.querySelector('p').textContent = 'No API keys found. Paste text containing keys or enter a key above.';
+      els.emptyState.querySelector('p').textContent = 'No API keys found. Paste text containing keys above.';
       els.resultsList.innerHTML = '';
       return;
     }
 
-    // Reset state
-    state.keys = keys.map((k) => ({
-      key: k,
-      status: 'pending',
-      tier: 'Unknown',
-      rpm: 0,
-      tpm: 0,
-      rpmRemaining: 0,
-      tpmRemaining: 0,
-      headers: null,
-      error: null,
-      expanded: false,
-      revealed: false,
-    }));
+    // Merge with existing keys (don't re-check already validated ones)
+    const existingKeys = new Set(state.keys.map((k) => k.key));
+    const newKeys = keys.filter((k) => !existingKeys.has(k));
+
+    newKeys.forEach((k) => {
+      state.keys.push({
+        key: k,
+        status: 'pending',
+        tier: 'Unknown',
+        rpm: 0,
+        tpm: 0,
+        rpmRemaining: 0,
+        tpmRemaining: 0,
+        responseTime: 0,
+        headers: null,
+        error: null,
+        errorFull: null,
+        expanded: false,
+        revealed: false,
+      });
+    });
 
     els.emptyState.classList.add('hidden');
-    els.resultsList.innerHTML = '';
 
-    // Render initial cards
-    state.keys.forEach((entry) => renderKeyCard(entry));
+    // Render all cards
+    renderAllCards();
+    updateStats();
 
-    // Start validation
-    await batchValidate(state.keys.map((k) => k.key));
+    // Validate only new keys
+    await batchValidate(newKeys);
 
-    // Final re-render with sort/filter applied
     renderAllCards();
     updateStats();
   }
@@ -642,12 +747,20 @@
     cacheEls();
     setupControls();
 
+    // Load saved keys from localStorage (encrypted)
+    const saved = loadKeys();
+    if (saved.length > 0) {
+      state.keys = saved;
+      renderAllCards();
+      updateStats();
+    }
+
     els.checkBtn.addEventListener('click', handleCheck);
     els.copyAllBtn.addEventListener('click', copyAllValid);
 
-    // Allow Enter key on single input
-    els.singleInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') handleCheck();
+    // Ctrl+Enter to check
+    els.bulkInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleCheck();
     });
 
     // CORS probe on load
