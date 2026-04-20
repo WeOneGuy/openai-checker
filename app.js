@@ -541,199 +541,300 @@
     const startTime = Date.now();
     const headers = {};
 
-    // Strategy: test models in order to determine tier
-    // 1. Try gemini-3.1-pro-preview (paid only) → if 200, key is Paid
-    // 2. Try gemini-3.1-flash-lite-preview (free tier) → if 200, key is Free
-    // 3. If both fail → check error type to determine if key is invalid or just overloaded
+    // Strategy:
+    // 1. Call GET /v1/models?key={key} — validates key + gets available model list
+    // 2. Find a "pro" model in the list → test it for paid tier
+    // 3. Find a "flash" model → test it for free tier
+    // 4. If key invalid (400/401) → invalid
+    // 5. If key valid but no models accessible → invalid
 
-    // Step 1: Test Pro model (paid tier indicator)
+    // Step 1: List models to validate key and discover available models
     try {
-      const proController = new AbortController();
-      const proTimeout = setTimeout(() => proController.abort(), REQUEST_TIMEOUT);
+      const listController = new AbortController();
+      const listTimeout = setTimeout(() => listController.abort(), REQUEST_TIMEOUT);
 
-      const proResponse = await fetch(
-        `${GEMINI_BASE_URL}/models/gemini-3.1-pro-preview:generateContent?key=${encodeURIComponent(key)}`,
+      const listResponse = await fetch(
+        `${GEMINI_BASE_URL}/models?key=${encodeURIComponent(key)}`,
         {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Hi' }] }],
-            generationConfig: { maxOutputTokens: 5 },
-          }),
-          signal: proController.signal,
+          method: 'GET',
+          signal: listController.signal,
         }
       );
 
-      clearTimeout(proTimeout);
-      const proTime = Date.now() - startTime;
-      entry.responseTime = proTime;
+      clearTimeout(listTimeout);
 
-      if (proResponse.status === 200) {
-        // Paid tier — Pro works
-        entry.status = 'valid';
-        entry.type = 'gemini';
-        entry.tier = 'Paid';
-        entry.isFreeTier = false;
-        entry.rpm = 0;
-        entry.rpmRemaining = 0;
-        entry.tpm = 0;
-        entry.tpmRemaining = 0;
-        entry.headers = { 'pro_access': 'true', 'pro_model': 'gemini-3.1-pro-preview', 'response_time_ms': String(proTime) };
-        entry.error = null;
-        entry.errorFull = null;
-        return;
-      }
-
-      // Pro failed — parse error to understand why
-      let proError = '';
-      let proErrorFull = '';
-      try {
-        const proBody = await proResponse.json();
-        proError = proBody?.error?.message || `Pro model: HTTP ${proResponse.status}`;
-        proErrorFull = JSON.stringify(proBody, null, 2);
-        headers['pro_error'] = proError;
-        headers['pro_status'] = String(proResponse.status);
-      } catch {
-        proError = `Pro model: HTTP ${proResponse.status}`;
-        proErrorFull = proError;
-      }
-
-      // If 400/401 → key is completely invalid, no need to test Flash
-      if (proResponse.status === 400 || proResponse.status === 401) {
+      // Invalid key — 400, 401
+      if (listResponse.status === 400 || listResponse.status === 401 || listResponse.status === 403) {
+        entry.responseTime = Date.now() - startTime;
         entry.status = 'invalid';
         entry.type = 'gemini';
         entry.tier = 'Unknown';
-        entry.rpm = 0;
-        entry.rpmRemaining = 0;
-        entry.tpm = 0;
-        entry.tpmRemaining = 0;
-        entry.headers = headers;
-        entry.error = proError;
-        entry.errorFull = proErrorFull;
+
+        try {
+          const errBody = await listResponse.json();
+          const errMsg = errBody?.error?.message || `HTTP ${listResponse.status}`;
+          const errFull = JSON.stringify(errBody, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+          entry.headers = { 'list_status': String(listResponse.status) };
+        } catch {
+          entry.error = `Invalid API key (HTTP ${listResponse.status})`;
+          entry.errorFull = `HTTP ${listResponse.status}`;
+          entry.headers = { 'list_status': String(listResponse.status) };
+        }
         return;
       }
-    } catch (err) {
-      entry.responseTime = Date.now() - startTime;
-      if (err.name === 'AbortError') {
+
+      if (listResponse.status !== 200) {
+        entry.responseTime = Date.now() - startTime;
         entry.status = 'error';
-        entry.error = 'Pro model request timed out (15s)';
-        entry.errorFull = 'Pro model request timed out (15s)';
-        entry.headers = headers;
+        entry.type = 'gemini';
+        entry.error = `Unexpected response from models list: HTTP ${listResponse.status}`;
+        entry.errorFull = `HTTP ${listResponse.status}`;
+        entry.headers = { 'list_status': String(listResponse.status) };
         return;
       }
-      // Network error on Pro — try Flash anyway
-    }
 
-    // Step 2: Test Flash model (free tier indicator)
-    try {
-      const flashController = new AbortController();
-      const flashTimeout = setTimeout(() => flashController.abort(), REQUEST_TIMEOUT);
+      // Key is valid! Parse available models
+      const listBody = await listResponse.json();
+      const models = listBody?.models || [];
 
-      const flashResponse = await fetch(
-        `${GEMINI_BASE_URL}/models/gemini-3.1-flash-lite-preview:generateContent?key=${encodeURIComponent(key)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Hi' }] }],
-            generationConfig: { maxOutputTokens: 5 },
-          }),
-          signal: flashController.signal,
-        }
+      // Extract model names (format: "models/gemini-2.5-flash")
+      const modelNames = models.map((m) => m.name?.replace('models/', '') || '');
+
+      // Store model list in headers for expandable details
+      headers['available_models'] = modelNames.join(', ');
+      headers['models_count'] = String(modelNames.length);
+
+      // Find models with supportedMethods that include "generateContent"
+      const genModels = models.filter((m) =>
+        m.supportedGenerationMethods?.includes('generateContent')
       );
+      const genModelNames = genModels.map((m) => m.name?.replace('models/', '') || '');
 
-      clearTimeout(flashTimeout);
+      // Find best Pro model to test (paid tier indicator)
+      // Priority: gemini-2.5-pro (most common paid indicator)
+      const proCandidates = genModelNames.filter((n) =>
+        n.includes('pro') && !n.includes('flash')
+      );
+      const proModel = proCandidates.sort((a, b) => b.localeCompare(a))[0] || null;
+
+      // Find best Flash model to test (free tier indicator)
+      const flashCandidates = genModelNames.filter((n) =>
+        n.includes('flash') || n.includes('lite')
+      );
+      const flashModel = flashCandidates.sort((a, b) => {
+        // Prefer flash-lite (cheapest) over flash
+        const aHasLite = a.includes('lite');
+        const bHasLite = b.includes('lite');
+        if (aHasLite && !bHasLite) return -1;
+        if (!aHasLite && bHasLite) return 1;
+        return b.localeCompare(a);
+      })[0] || null;
+
+      // Step 2: If Pro model exists, test it for paid tier
+      if (proModel) {
+        try {
+          const proController = new AbortController();
+          const proTimeout = setTimeout(() => proController.abort(), REQUEST_TIMEOUT);
+
+          const proResponse = await fetch(
+            `${GEMINI_BASE_URL}/models/${proModel}:generateContent?key=${encodeURIComponent(key)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Hi' }] }],
+                generationConfig: { maxOutputTokens: 5 },
+              }),
+              signal: proController.signal,
+            }
+          );
+
+          clearTimeout(proTimeout);
+
+          if (proResponse.status === 200) {
+            entry.responseTime = Date.now() - startTime;
+            entry.status = 'valid';
+            entry.type = 'gemini';
+            entry.tier = 'Paid';
+            entry.isFreeTier = false;
+            entry.rpm = 0;
+            entry.rpmRemaining = 0;
+            entry.tpm = 0;
+            entry.tpmRemaining = 0;
+            entry.headers = { ...headers, 'pro_access': 'true', 'pro_model': proModel };
+            entry.error = null;
+            entry.errorFull = null;
+            return;
+          }
+
+          // Pro failed with 429 — paid tier but rate limited
+          if (proResponse.status === 429) {
+            entry.responseTime = Date.now() - startTime;
+            entry.status = 'valid';
+            entry.type = 'gemini';
+            entry.tier = 'Paid';
+            entry.isFreeTier = false;
+            entry.rpm = 0;
+            entry.rpmRemaining = 0;
+            entry.tpm = 0;
+            entry.tpmRemaining = 0;
+
+            try {
+              const proBody = await proResponse.json();
+              const errMsg = proBody?.error?.message || 'Rate limited';
+              entry.error = errMsg;
+              entry.errorFull = JSON.stringify(proBody, null, 2);
+              entry.headers = { ...headers, 'pro_access': 'rate-limited', 'pro_model': proModel };
+            } catch {
+              entry.error = 'Pro model rate limited (429)';
+              entry.errorFull = '429';
+              entry.headers = { ...headers, 'pro_access': 'rate-limited', 'pro_model': proModel };
+            }
+            return;
+          }
+
+          // Pro failed with 403 — likely free tier (insufficient access)
+          headers['pro_error'] = `HTTP ${proResponse.status}`;
+          headers['pro_status'] = String(proResponse.status);
+        } catch {
+          // Pro test timed out or network error — skip, try Flash
+          headers['pro_error'] = 'timeout';
+        }
+      }
+
+      // Step 3: Test Flash model (free tier indicator)
+      if (flashModel) {
+        try {
+          const flashController = new AbortController();
+          const flashTimeout = setTimeout(() => flashController.abort(), REQUEST_TIMEOUT);
+
+          const flashResponse = await fetch(
+            `${GEMINI_BASE_URL}/models/${flashModel}:generateContent?key=${encodeURIComponent(key)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Hi' }] }],
+                generationConfig: { maxOutputTokens: 5 },
+              }),
+              signal: flashController.signal,
+            }
+          );
+
+          clearTimeout(flashTimeout);
+          entry.responseTime = Date.now() - startTime;
+
+          if (flashResponse.status === 200) {
+            entry.status = 'valid';
+            entry.type = 'gemini';
+            entry.tier = 'Free';
+            entry.isFreeTier = true;
+            entry.rpm = 0;
+            entry.rpmRemaining = 0;
+            entry.tpm = 0;
+            entry.tpmRemaining = 0;
+            entry.headers = { ...headers, 'flash_access': 'true', 'flash_model': flashModel };
+            entry.error = null;
+            entry.errorFull = null;
+            return;
+          }
+
+          if (flashResponse.status === 429) {
+            entry.status = 'rate-limited';
+            entry.type = 'gemini';
+            entry.tier = 'Free';
+            entry.isFreeTier = true;
+            entry.rpm = 0;
+            entry.rpmRemaining = 0;
+            entry.tpm = 0;
+            entry.tpmRemaining = 0;
+
+            try {
+              const flashBody = await flashResponse.json();
+              const errMsg = flashBody?.error?.message || 'Model is temporarily overloaded';
+              const errFull = JSON.stringify(flashBody, null, 2);
+              entry.error = errMsg;
+              entry.errorFull = errFull;
+              entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': '429', 'flash_model': flashModel };
+            } catch {
+              entry.error = 'Model is temporarily overloaded (429)';
+              entry.errorFull = '429 RESOURCE_EXHAUSTED';
+              entry.headers = { ...headers, 'flash_error': '429', 'flash_status': '429', 'flash_model': flashModel };
+            }
+            return;
+          }
+
+          // Flash also failed
+          if (flashResponse.status === 400 || flashResponse.status === 401 || flashResponse.status === 403) {
+            entry.status = 'invalid';
+            entry.type = 'gemini';
+            entry.tier = 'Unknown';
+
+            try {
+              const flashBody = await flashResponse.json();
+              const errMsg = flashBody?.error?.message || `HTTP ${flashResponse.status}`;
+              const errFull = JSON.stringify(flashBody, null, 2);
+              entry.error = errMsg;
+              entry.errorFull = errFull;
+              entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
+            } catch {
+              entry.error = `HTTP ${flashResponse.status}`;
+              entry.errorFull = `HTTP ${flashResponse.status}`;
+            }
+            return;
+          }
+
+          // Other error on Flash
+          entry.status = 'error';
+          entry.type = 'gemini';
+          try {
+            const flashBody = await flashResponse.json();
+            const errMsg = flashBody?.error?.message || `Unexpected HTTP ${flashResponse.status}`;
+            const errFull = JSON.stringify(flashBody, null, 2);
+            entry.error = errMsg;
+            entry.errorFull = errFull;
+            entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
+          } catch {
+            entry.error = `Unexpected HTTP ${flashResponse.status}`;
+            entry.errorFull = `Unexpected HTTP ${flashResponse.status}`;
+          }
+          return;
+        } catch (err) {
+          entry.responseTime = Date.now() - startTime;
+          entry.status = 'error';
+          entry.error = err.name === 'AbortError' ? 'Request timed out (15s)' : (err.message || 'Network error');
+          entry.errorFull = err.stack || err.message || 'Network error';
+          entry.headers = headers;
+          return;
+        }
+      }
+
+      // No pro or flash models found — key might be valid but has no generateContent models
       entry.responseTime = Date.now() - startTime;
-
-      if (flashResponse.status === 200) {
-        // Free tier — Flash works but Pro didn't
-        entry.status = 'valid';
-        entry.type = 'gemini';
-        entry.tier = 'Free';
-        entry.isFreeTier = true;
-        entry.rpm = 0;
-        entry.rpmRemaining = 0;
-        entry.tpm = 0;
-        entry.tpmRemaining = 0;
-        entry.headers = { ...headers, 'flash_access': 'true', 'flash_model': 'gemini-3.1-flash-lite-preview' };
-        entry.error = null;
-        entry.errorFull = null;
-        return;
-      }
-
-      if (flashResponse.status === 429) {
-        // Rate limited — key is valid but temporarily overloaded
-        entry.status = 'rate-limited';
-        entry.type = 'gemini';
-        entry.tier = 'Free';
-        entry.isFreeTier = true;
-        entry.rpm = 0;
-        entry.rpmRemaining = 0;
-        entry.tpm = 0;
-        entry.tpmRemaining = 0;
-
-        try {
-          const flashBody = await flashResponse.json();
-          const errMsg = flashBody?.error?.message || 'Model is temporarily overloaded';
-          const errFull = JSON.stringify(flashBody, null, 2);
-          entry.error = errMsg;
-          entry.errorFull = errFull;
-          entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': '429' };
-        } catch {
-          entry.error = 'Model is temporarily overloaded (429)';
-          entry.errorFull = '429 RESOURCE_EXHAUSTED';
-          entry.headers = { ...headers, 'flash_error': '429', 'flash_status': '429' };
-        }
-        return;
-      }
-
-      // Flash also failed — key might be invalid or restricted
-      if (flashResponse.status === 400 || flashResponse.status === 401 || flashResponse.status === 403) {
-        entry.status = 'invalid';
-        entry.type = 'gemini';
-        entry.tier = 'Unknown';
-
-        try {
-          const flashBody = await flashResponse.json();
-          const errMsg = flashBody?.error?.message || `HTTP ${flashResponse.status}`;
-          const errFull = JSON.stringify(flashBody, null, 2);
-          entry.error = errMsg;
-          entry.errorFull = errFull;
-          entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
-        } catch {
-          entry.error = `HTTP ${flashResponse.status}`;
-          entry.errorFull = `HTTP ${flashResponse.status}`;
-        }
-        return;
-      }
-
-      // Other error
-      entry.status = 'error';
+      entry.status = 'valid';
       entry.type = 'gemini';
-      try {
-        const flashBody = await flashResponse.json();
-        const errMsg = flashBody?.error?.message || `Unexpected HTTP ${flashResponse.status}`;
-        const errFull = JSON.stringify(flashBody, null, 2);
-        entry.error = errMsg;
-        entry.errorFull = errFull;
-        entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
-      } catch {
-        entry.error = `Unexpected HTTP ${flashResponse.status}`;
-        entry.errorFull = `Unexpected HTTP ${flashResponse.status}`;
-      }
+      entry.tier = 'Unknown';
+      entry.rpm = 0;
+      entry.rpmRemaining = 0;
+      entry.tpm = 0;
+      entry.tpmRemaining = 0;
+      entry.headers = headers;
+      entry.error = 'Key is valid but no generateContent models available';
+      entry.errorFull = `Available models: ${modelNames.join(', ')}`;
     } catch (err) {
       entry.responseTime = Date.now() - startTime;
       if (err.name === 'AbortError') {
         entry.status = 'error';
         entry.error = 'Request timed out (15s)';
         entry.errorFull = 'Request timed out (15s)';
-        entry.headers = headers;
       } else {
         entry.status = 'error';
         entry.error = err.message || 'Network error';
         entry.errorFull = err.stack || err.message || 'Network error';
-        entry.headers = headers;
       }
+      entry.headers = headers;
     }
   }
 
