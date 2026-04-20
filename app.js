@@ -9,6 +9,7 @@
   const API_URL = 'https://api.openai.com/v1/chat/completions';
   const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/key';
   const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/api/v1/credits';
+  const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1';
   const REQUEST_TIMEOUT = 15000;
   const MAX_CONCURRENCY = 5;
   const STORAGE_KEY = 'oai-checker-keys';
@@ -31,6 +32,7 @@
     /sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}/g,
     /sk-proj-[A-Za-z0-9\-_]{40,}/g,
     /sk-or-[a-zA-Z0-9\-_]{20,}/g,
+    /AIzaSy[A-Za-z0-9_-]{33}/g,
   ];
 
   // ── Key Type Detection ──────────────────────────────────
@@ -38,6 +40,7 @@
     if (key.startsWith('sk-or-')) return 'openrouter';
     if (key.startsWith('sk-proj-') || /^sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}$/.test(key)) return 'openai';
     if (key.startsWith('sk-')) return 'openai'; // default assumption
+    if (key.startsWith('AIzaSy')) return 'gemini';
     return 'openai';
   }
 
@@ -215,6 +218,7 @@
       'Tier 3': 'tier-3',
       'Tier 4': 'tier-4',
       'Tier 5': 'tier-5',
+      'Paid': 'tier-paid',
     };
     return map[tierName] || 'tier-unknown';
   }
@@ -230,6 +234,8 @@
 
     if (entry.type === 'openrouter') {
       await validateOpenRouterKey(key, entry);
+    } else if (entry.type === 'gemini') {
+      await validateGeminiKey(key, entry);
     } else {
       await validateOpenAIKey(key, entry);
     }
@@ -530,6 +536,207 @@
     }
   }
 
+  // ── Gemini Key Validation ────────────────────────────────
+  async function validateGeminiKey(key, entry) {
+    const startTime = Date.now();
+    const headers = {};
+
+    // Strategy: test models in order to determine tier
+    // 1. Try gemini-3.1-pro-preview (paid only) → if 200, key is Paid
+    // 2. Try gemini-3.1-flash-lite-preview (free tier) → if 200, key is Free
+    // 3. If both fail → check error type to determine if key is invalid or just overloaded
+
+    // Step 1: Test Pro model (paid tier indicator)
+    try {
+      const proController = new AbortController();
+      const proTimeout = setTimeout(() => proController.abort(), REQUEST_TIMEOUT);
+
+      const proResponse = await fetch(
+        `${GEMINI_BASE_URL}/models/gemini-3.1-pro-preview:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Hi' }] }],
+            generationConfig: { maxOutputTokens: 5 },
+          }),
+          signal: proController.signal,
+        }
+      );
+
+      clearTimeout(proTimeout);
+      const proTime = Date.now() - startTime;
+      entry.responseTime = proTime;
+
+      if (proResponse.status === 200) {
+        // Paid tier — Pro works
+        entry.status = 'valid';
+        entry.type = 'gemini';
+        entry.tier = 'Paid';
+        entry.isFreeTier = false;
+        entry.rpm = 0;
+        entry.rpmRemaining = 0;
+        entry.tpm = 0;
+        entry.tpmRemaining = 0;
+        entry.headers = { 'pro_access': 'true', 'pro_model': 'gemini-3.1-pro-preview', 'response_time_ms': String(proTime) };
+        entry.error = null;
+        entry.errorFull = null;
+        return;
+      }
+
+      // Pro failed — parse error to understand why
+      let proError = '';
+      let proErrorFull = '';
+      try {
+        const proBody = await proResponse.json();
+        proError = proBody?.error?.message || `Pro model: HTTP ${proResponse.status}`;
+        proErrorFull = JSON.stringify(proBody, null, 2);
+        headers['pro_error'] = proError;
+        headers['pro_status'] = String(proResponse.status);
+      } catch {
+        proError = `Pro model: HTTP ${proResponse.status}`;
+        proErrorFull = proError;
+      }
+
+      // If 400/401 → key is completely invalid, no need to test Flash
+      if (proResponse.status === 400 || proResponse.status === 401) {
+        entry.status = 'invalid';
+        entry.type = 'gemini';
+        entry.tier = 'Unknown';
+        entry.rpm = 0;
+        entry.rpmRemaining = 0;
+        entry.tpm = 0;
+        entry.tpmRemaining = 0;
+        entry.headers = headers;
+        entry.error = proError;
+        entry.errorFull = proErrorFull;
+        return;
+      }
+    } catch (err) {
+      entry.responseTime = Date.now() - startTime;
+      if (err.name === 'AbortError') {
+        entry.status = 'error';
+        entry.error = 'Pro model request timed out (15s)';
+        entry.errorFull = 'Pro model request timed out (15s)';
+        entry.headers = headers;
+        return;
+      }
+      // Network error on Pro — try Flash anyway
+    }
+
+    // Step 2: Test Flash model (free tier indicator)
+    try {
+      const flashController = new AbortController();
+      const flashTimeout = setTimeout(() => flashController.abort(), REQUEST_TIMEOUT);
+
+      const flashResponse = await fetch(
+        `${GEMINI_BASE_URL}/models/gemini-3.1-flash-lite-preview:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Hi' }] }],
+            generationConfig: { maxOutputTokens: 5 },
+          }),
+          signal: flashController.signal,
+        }
+      );
+
+      clearTimeout(flashTimeout);
+      entry.responseTime = Date.now() - startTime;
+
+      if (flashResponse.status === 200) {
+        // Free tier — Flash works but Pro didn't
+        entry.status = 'valid';
+        entry.type = 'gemini';
+        entry.tier = 'Free';
+        entry.isFreeTier = true;
+        entry.rpm = 0;
+        entry.rpmRemaining = 0;
+        entry.tpm = 0;
+        entry.tpmRemaining = 0;
+        entry.headers = { ...headers, 'flash_access': 'true', 'flash_model': 'gemini-3.1-flash-lite-preview' };
+        entry.error = null;
+        entry.errorFull = null;
+        return;
+      }
+
+      if (flashResponse.status === 429) {
+        // Rate limited — key is valid but temporarily overloaded
+        entry.status = 'rate-limited';
+        entry.type = 'gemini';
+        entry.tier = 'Free';
+        entry.isFreeTier = true;
+        entry.rpm = 0;
+        entry.rpmRemaining = 0;
+        entry.tpm = 0;
+        entry.tpmRemaining = 0;
+
+        try {
+          const flashBody = await flashResponse.json();
+          const errMsg = flashBody?.error?.message || 'Model is temporarily overloaded';
+          const errFull = JSON.stringify(flashBody, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+          entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': '429' };
+        } catch {
+          entry.error = 'Model is temporarily overloaded (429)';
+          entry.errorFull = '429 RESOURCE_EXHAUSTED';
+          entry.headers = { ...headers, 'flash_error': '429', 'flash_status': '429' };
+        }
+        return;
+      }
+
+      // Flash also failed — key might be invalid or restricted
+      if (flashResponse.status === 400 || flashResponse.status === 401 || flashResponse.status === 403) {
+        entry.status = 'invalid';
+        entry.type = 'gemini';
+        entry.tier = 'Unknown';
+
+        try {
+          const flashBody = await flashResponse.json();
+          const errMsg = flashBody?.error?.message || `HTTP ${flashResponse.status}`;
+          const errFull = JSON.stringify(flashBody, null, 2);
+          entry.error = errMsg;
+          entry.errorFull = errFull;
+          entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
+        } catch {
+          entry.error = `HTTP ${flashResponse.status}`;
+          entry.errorFull = `HTTP ${flashResponse.status}`;
+        }
+        return;
+      }
+
+      // Other error
+      entry.status = 'error';
+      entry.type = 'gemini';
+      try {
+        const flashBody = await flashResponse.json();
+        const errMsg = flashBody?.error?.message || `Unexpected HTTP ${flashResponse.status}`;
+        const errFull = JSON.stringify(flashBody, null, 2);
+        entry.error = errMsg;
+        entry.errorFull = errFull;
+        entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status) };
+      } catch {
+        entry.error = `Unexpected HTTP ${flashResponse.status}`;
+        entry.errorFull = `Unexpected HTTP ${flashResponse.status}`;
+      }
+    } catch (err) {
+      entry.responseTime = Date.now() - startTime;
+      if (err.name === 'AbortError') {
+        entry.status = 'error';
+        entry.error = 'Request timed out (15s)';
+        entry.errorFull = 'Request timed out (15s)';
+        entry.headers = headers;
+      } else {
+        entry.status = 'error';
+        entry.error = err.message || 'Network error';
+        entry.errorFull = err.stack || err.message || 'Network error';
+        entry.headers = headers;
+      }
+    }
+  }
+
   // ── Batch Validation with Concurrency ────────────────────
   async function batchValidate(keys) {
     state.checking = true;
@@ -552,6 +759,7 @@
   async function probeCORS() {
     let openaiOk = false;
     let openrouterOk = false;
+    let geminiOk = false;
 
     // Probe OpenAI API
     try {
@@ -574,22 +782,34 @@
       openrouterOk = true;
     } catch {}
 
-    state.corsOk = openaiOk || openrouterOk;
+    // Probe Gemini API
+    try {
+      await fetch(`${GEMINI_BASE_URL}/models?key=test`, {
+        method: 'GET',
+      });
+      geminiOk = true;
+    } catch {}
 
-    if (!openaiOk && !openrouterOk) {
-      // Both blocked
+    state.corsOk = openaiOk || openrouterOk || geminiOk;
+
+    const anyBlocked = !openaiOk || !openrouterOk || !geminiOk;
+    const allBlocked = !openaiOk && !openrouterOk && !geminiOk;
+
+    if (allBlocked) {
       els.corsBanner.classList.remove('hidden');
-      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Blocked</strong> — Your browser cannot reach the OpenAI or OpenRouter APIs directly. Key validation will fail. This may work in other browsers or with a proxy extension.';
-    } else if (!openaiOk) {
-      // Only OpenAI blocked
+      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Blocked</strong> — Your browser cannot reach any API. Key validation will fail. Try a different browser or proxy extension.';
+    } else if (anyBlocked) {
       els.corsBanner.classList.remove('hidden');
-      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Partially Blocked</strong> — OpenAI API is blocked by CORS, but OpenRouter API is accessible. OpenAI key validation will fail; OpenRouter keys can still be checked.';
-    } else if (!openrouterOk) {
-      // Only OpenRouter blocked
-      els.corsBanner.classList.remove('hidden');
-      els.corsBanner.querySelector('.text').innerHTML = '<strong>CORS Partially Blocked</strong> — OpenRouter API is blocked by CORS, but OpenAI API is accessible. OpenRouter key validation will fail; OpenAI keys can still be checked.';
+      const blocked = [];
+      if (!openaiOk) blocked.push('OpenAI');
+      if (!openrouterOk) blocked.push('OpenRouter');
+      if (!geminiOk) blocked.push('Gemini');
+      const accessible = [];
+      if (openaiOk) accessible.push('OpenAI');
+      if (openrouterOk) accessible.push('OpenRouter');
+      if (geminiOk) accessible.push('Gemini');
+      els.corsBanner.querySelector('.text').innerHTML = `<strong>CORS Partially Blocked</strong> — ${blocked.join(', ')} API is blocked. ${accessible.join(', ')} keys can still be checked.`;
     } else {
-      // Both accessible
       els.corsBanner.classList.add('hidden');
     }
   }
@@ -728,7 +948,7 @@
 
     // Type badge
     const typeBadgeHtml = entry.type
-      ? `<span class="type-badge ${entry.type}">${entry.type === 'openrouter' ? 'OpenRouter' : 'OpenAI'}</span>`
+      ? `<span class="type-badge ${entry.type}">${entry.type === 'openrouter' ? 'OpenRouter' : entry.type === 'gemini' ? 'Gemini' : 'OpenAI'}</span>`
       : '';
 
     const tierBadge = entry.tier && entry.tier !== 'Unknown'
@@ -765,7 +985,7 @@
       balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">∞</span><span class="limit-label">Balance</span></div>`;
     }
 
-    // Limits: for OpenRouter show balance + RPM, for OpenAI show RPM/TPM/Rem
+    // Limits: for OpenRouter show balance + RPM, for Gemini show tier info, for OpenAI show RPM/TPM/Rem
     let limitsHtml = '';
     if (entry.type === 'openrouter') {
       const rpmHtml = entry.rpm
@@ -777,6 +997,11 @@
       const limitItems = [balanceHtml, rpmHtml, rpmRemHtml, timeHtml].filter(Boolean);
       if (limitItems.length) {
         limitsHtml = `<div class="limits">${limitItems.join('')}</div>`;
+      }
+    } else if (entry.type === 'gemini') {
+      // Gemini: no RPM/TPM/balance — just show time
+      if (timeHtml) {
+        limitsHtml = `<div class="limits">${timeHtml}</div>`;
       }
     } else {
       limitsHtml = (entry.rpm || entry.tpm)
@@ -875,6 +1100,7 @@
     if (state.filterBy === 'invalid') return state.keys.filter((k) => k.status === 'invalid' || k.status === 'error');
     if (state.filterBy === 'openai') return state.keys.filter((k) => k.type === 'openai');
     if (state.filterBy === 'openrouter') return state.keys.filter((k) => k.type === 'openrouter');
+    if (state.filterBy === 'gemini') return state.keys.filter((k) => k.type === 'gemini');
     if (state.filterBy.startsWith('tier-')) {
       const tierName = state.filterBy === 'tier-Free' ? 'Free' : `Tier ${state.filterBy.replace('tier-', '')}`;
       return state.keys.filter((k) => k.tier === tierName);
@@ -913,8 +1139,8 @@
               const bIdx = bL === -1 ? 999 : bL;
               return aIdx - bIdx;
             }
-            // Mixed: OpenRouter valid > OpenAI valid (OpenRouter has balance, more useful)
-            const typePriority = { openrouter: 0, openai: 1 };
+            // Mixed: OpenRouter valid > Gemini Paid > OpenAI valid (OpenRouter has balance, most useful)
+            const typePriority = { openrouter: 0, gemini: 1, openai: 2 };
             return (typePriority[a.type] || 9) - (typePriority[b.type] || 9);
           }
 
@@ -942,7 +1168,7 @@
         break;
       case 'type':
         sorted.sort((a, b) => {
-          const typeOrder = { openrouter: 0, openai: 1 };
+          const typeOrder = { openrouter: 0, openai: 1, gemini: 2 };
           return (typeOrder[a.type] || 9) - (typeOrder[b.type] || 9);
         });
         break;

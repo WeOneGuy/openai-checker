@@ -27,7 +27,7 @@
     <!-- Header -->
     <header class="app-header">
       <h1>AI <span class="accent">Key Checker</span></h1>
-      <p>Validate OpenAI & OpenRouter API keys, check tiers, balances, and rate limits. Paste bulk text or enter a single key.</p>
+      <p>Validate OpenAI, OpenRouter & Gemini API keys, check tiers, balances, and rate limits.</p>
     </header>
 
     <!-- CORS Warning Banner -->
@@ -45,7 +45,7 @@
       <textarea
         id="bulk-input"
         class="key-input"
-        placeholder="Paste text containing API keys (sk-..., sk-proj-..., sk-or-v1-...) — keys will be auto-detected and validated"
+        placeholder="Paste text containing API keys (sk-..., sk-proj-..., sk-or-v1-..., AIzaSy...) — keys will be auto-detected and validated"
         spellcheck="false"
         autocomplete="off"
       ></textarea>
@@ -105,6 +105,7 @@
         <button class="btn-ghost" data-filter="invalid">Invalid</button>
         <button class="btn-ghost" data-filter="openai">OpenAI</button>
         <button class="btn-ghost" data-filter="openrouter">OpenRouter</button>
+        <button class="btn-ghost" data-filter="gemini">Gemini</button>
       </div>
       <div class="group" style="margin-left:auto;">
         <button id="copy-all-btn" class="btn-ghost">Copy All Valid Keys</button>

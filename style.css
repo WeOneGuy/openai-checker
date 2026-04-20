@@ -713,6 +713,7 @@ textarea.key-input::placeholder {
 .tier-badge.tier-3 { background: rgba(139, 92, 246, 0.15); color: var(--accent-secondary); border: 1px solid rgba(139, 92, 246, 0.3); }
 .tier-badge.tier-4 { background: rgba(217, 70, 239, 0.15); color: #d946ef; border: 1px solid rgba(217, 70, 239, 0.3); }
 .tier-badge.tier-5 { background: rgba(236, 72, 153, 0.15); color: #ec4899; border: 1px solid rgba(236, 72, 153, 0.3); }
+.tier-badge.tier-paid { background: rgba(139, 92, 246, 0.15); color: var(--accent-secondary); border: 1px solid rgba(139, 92, 246, 0.3); }
 .tier-badge.tier-unknown { background: rgba(113, 113, 122, 0.15); color: var(--text-muted); border: 1px solid rgba(113, 113, 122, 0.3); }
 
 /* ── Type Badge ─────────────────────────────────────────── */
@@ -735,6 +736,12 @@ textarea.key-input::placeholder {
   background: rgba(139, 92, 246, 0.15);
   color: var(--accent-secondary);
   border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.type-badge.gemini {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
 }
 
 /* ── Balance Item ────────────────────────────────────────── */
