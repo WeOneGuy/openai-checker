@@ -9,7 +9,7 @@
   const API_URL = 'https://api.openai.com/v1/chat/completions';
   const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/key';
   const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/api/v1/credits';
-  const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1';
+  const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
   const REQUEST_TIMEOUT = 15000;
   const MAX_CONCURRENCY = 5;
   const STORAGE_KEY = 'oai-checker-keys';
