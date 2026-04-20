@@ -580,6 +580,10 @@ textarea.key-input::placeholder {
   overflow: hidden;
 }
 
+.key-card.rendered {
+  animation: none;
+}
+
 .key-card::before {
   content: '';
   position: absolute;

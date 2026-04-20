@@ -8,6 +8,7 @@
   // ── Constants ────────────────────────────────────────────
   const API_URL = 'https://api.openai.com/v1/chat/completions';
   const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/key';
+  const OPENROUTER_CREDITS_URL = 'https://openrouter.ai/api/v1/credits';
   const REQUEST_TIMEOUT = 15000;
   const MAX_CONCURRENCY = 5;
   const STORAGE_KEY = 'oai-checker-keys';
@@ -411,10 +412,6 @@
 
         entry.status = 'valid';
         entry.type = 'openrouter';
-        entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
-          ? data.limit_remaining : null;
-        entry.balanceLimit = data.limit !== null && data.limit !== undefined
-          ? data.limit : null;
         entry.isFreeTier = data.is_free_tier || false;
         entry.usage = data.usage || 0;
         entry.tier = data.is_free_tier ? 'Free' : 'Paid';
@@ -427,15 +424,57 @@
         entry.error = null;
         entry.errorFull = null;
 
-        // Store full response data in headers for expandable details
+        // Store key info in headers for expandable details
         if (data.label) headers['label'] = data.label;
-        if (data.limit !== null && data.limit !== undefined) headers['limit'] = String(data.limit);
-        if (data.limit_remaining !== null && data.limit_remaining !== undefined) headers['limit_remaining'] = String(data.limit_remaining);
-        if (data.usage !== null && data.usage !== undefined) headers['usage'] = String(data.usage);
+        if (data.limit !== null && data.limit !== undefined) headers['key_limit'] = String(data.limit);
+        if (data.limit_remaining !== null && data.limit_remaining !== undefined) headers['key_limit_remaining'] = String(data.limit_remaining);
+        if (data.usage !== null && data.usage !== undefined) headers['key_usage'] = String(data.usage);
         if (data.is_free_tier !== undefined) headers['is_free_tier'] = String(data.is_free_tier);
         if (data.rate_limit) {
           if (data.rate_limit.requests) headers['rate_limit_requests'] = String(data.rate_limit.requests);
           if (data.rate_limit.tokens) headers['rate_limit_tokens'] = String(data.rate_limit.tokens);
+        }
+
+        // Now fetch credits endpoint for real balance
+        try {
+          const creditsResponse = await fetch(OPENROUTER_CREDITS_URL, {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${key}`,
+              'HTTP-Referer': 'https://weoneguy.github.io/openai-checker',
+              'X-Title': 'AI Key Checker',
+            },
+          });
+
+          if (creditsResponse.status === 200) {
+            const creditsBody = await creditsResponse.json();
+            const creditsData = creditsBody?.data || {};
+
+            const totalCredits = creditsData.total_credits || 0;
+            const totalUsage = creditsData.total_usage || 0;
+            const remaining = totalCredits - totalUsage;
+
+            entry.balance = remaining;
+            entry.balanceLimit = totalCredits;
+            entry.usage = totalUsage;
+
+            // Store in headers for expandable details
+            headers['total_credits'] = String(totalCredits);
+            headers['total_usage'] = String(totalUsage);
+            headers['balance_remaining'] = String(remaining);
+          } else {
+            // Credits endpoint failed, fall back to /key endpoint data
+            entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
+              ? data.limit_remaining : null;
+            entry.balanceLimit = data.limit !== null && data.limit !== undefined
+              ? data.limit : null;
+          }
+        } catch {
+          // Credits fetch failed (network/CORS), fall back to /key endpoint data
+          entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
+            ? data.limit_remaining : null;
+          entry.balanceLimit = data.limit !== null && data.limit !== undefined
+            ? data.limit : null;
         }
       } else if (response.status === 401 || response.status === 403) {
         entry.status = 'invalid';
@@ -623,7 +662,7 @@
     const card = existing || document.createElement('div');
 
     card.id = cardId;
-    card.className = `key-card ${entry.status}`;
+    card.className = `key-card ${entry.status}${existing ? ' rendered' : ''}`;
     card.setAttribute('data-tier', entry.tier || '');
     card.setAttribute('data-status', entry.status);
     card.setAttribute('data-type', entry.type || 'openai');
@@ -633,6 +672,9 @@
     if (!existing) {
       const idx = state.keys.indexOf(entry);
       card.style.animationDelay = `${idx * 60}ms`;
+    } else {
+      // Already rendered — update without re-triggering animation
+      card.style.animationDelay = '';
     }
 
     renderKeyCardContent(card, entry);
