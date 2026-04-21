@@ -130,6 +130,7 @@
       orKeyLimit: k.orKeyLimit,
       orKeyLimitRemaining: k.orKeyLimitRemaining,
       orKeyUsageDaily: k.orKeyUsageDaily,
+      addedAt: k.addedAt,
     }));
     localStorage.setItem(STORAGE_KEY, encrypt(JSON.stringify(data)));
   }
@@ -161,6 +162,7 @@
         orKeyLimit: k.orKeyLimit !== undefined ? k.orKeyLimit : null,
         orKeyLimitRemaining: k.orKeyLimitRemaining !== undefined ? k.orKeyLimitRemaining : null,
         orKeyUsageDaily: k.orKeyUsageDaily !== undefined ? k.orKeyUsageDaily : null,
+        addedAt: k.addedAt || 0,
         headers: null,
         error: null,
         errorFull: null,
@@ -1250,26 +1252,34 @@
     const sorted = [...keys];
     switch (state.sortBy) {
       case 'smart':
-        // Valid keys first (regardless of type), then invalid/error
-        // Within valid: OpenRouter keys sorted by balance desc, OpenAI by tier
-        // Within invalid: no special ordering
+        // First: keys with addedAt (just scanned) sorted by addedAt descending (newest first)
+        // Then: old keys from storage sorted by status (valid first, then invalid/error)
         sorted.sort((a, b) => {
-          // 1. Status priority: valid/rate-limited > pending > checking > invalid > error
+          const aRecent = a.addedAt && a.addedAt > 0;
+          const bRecent = b.addedAt && b.addedAt > 0;
+
+          // Both recent: sort by addedAt descending (most recent first)
+          if (aRecent && bRecent) {
+            return b.addedAt - a.addedAt;
+          }
+
+          // One recent, one old: recent goes first
+          if (aRecent && !bRecent) return -1;
+          if (!aRecent && bRecent) return 1;
+
+          // Both old (from storage): sort by status (valid first)
           const statusPriority = { valid: 0, 'rate-limited': 0, pending: 1, checking: 2, invalid: 3, error: 4 };
           const aP = statusPriority[a.status] || 9;
           const bP = statusPriority[b.status] || 9;
           if (aP !== bP) return aP - bP;
 
-          // 2. Within valid keys: sort by balance (OpenRouter) or tier level (OpenAI)
-          // Higher balance / higher tier = better, so sort descending
+          // Same status: sort by balance (OpenRouter) or tier level (OpenAI)
           if (a.status === 'valid' || a.status === 'rate-limited') {
-            // OpenRouter: sort by balance descending (more money = higher)
             if (a.type === 'openrouter' && b.type === 'openrouter') {
               const aBal = a.balance || 0;
               const bBal = b.balance || 0;
               return bBal - aBal;
             }
-            // OpenAI: sort by tier level (higher tier = higher priority)
             if (a.type === 'openai' && b.type === 'openai') {
               const aL = TIER_ORDER.indexOf(a.tier);
               const bL = TIER_ORDER.indexOf(b.tier);
@@ -1277,7 +1287,6 @@
               const bIdx = bL === -1 ? 999 : bL;
               return aIdx - bIdx;
             }
-            // Mixed: OpenRouter valid > Gemini Paid > OpenAI valid (OpenRouter has balance, most useful)
             const typePriority = { openrouter: 0, gemini: 1, openai: 2 };
             return (typePriority[a.type] || 9) - (typePriority[b.type] || 9);
           }
@@ -1377,19 +1386,27 @@
     // Show extraction count
     const existingKeys = new Set(state.keys.map((k) => k.key));
     const newKeys = keys.filter((k) => !existingKeys.has(k));
+    const duplicateKeys = keys.filter((k) => existingKeys.has(k));
     const skipped = keys.length - newKeys.length;
 
-    els.extractCount.textContent = keys.length;
-    els.extractNew.textContent = newKeys.length;
-    els.extractBanner.classList.remove('hidden');
+    const now = Date.now();
 
-    // Update banner text for duplicates
-    if (skipped > 0) {
-      els.extractBanner.innerHTML = `<span class="extract-count">${keys.length}</span> keys found · <span class="extract-new">${newKeys.length}</span> new · ${skipped} already checked`;
+    // Handle duplicates: find existing entries and move them to top with new timestamp
+    if (duplicateKeys.length > 0) {
+      duplicateKeys.forEach((dupKey) => {
+        const idx = state.keys.findIndex((k) => k.key === dupKey);
+        if (idx !== -1) {
+          const [entry] = state.keys.splice(idx, 1);
+          entry.addedAt = now;
+          entry.status = 'pending';
+          state.keys.unshift(entry);
+        }
+      });
     }
 
-    newKeys.forEach((k) => {
-      state.keys.push({
+    // Add new keys at the beginning
+    if (newKeys.length > 0) {
+      const newEntries = newKeys.map((k) => ({
         key: k,
         status: 'pending',
         type: detectKeyType(k),
@@ -1403,13 +1420,30 @@
         isFreeTier: false,
         usage: 0,
         responseTime: 0,
+        orTotalCredits: null,
+        orTotalUsage: null,
+        orKeyLimit: null,
+        orKeyLimitRemaining: null,
+        orKeyUsageDaily: null,
+        addedAt: now,
         headers: null,
         error: null,
         errorFull: null,
         expanded: false,
         revealed: false,
-      });
-    });
+      }));
+      // Add at beginning (after duplicates which are already at beginning)
+      state.keys = [...newEntries, ...state.keys];
+    }
+
+    els.extractCount.textContent = keys.length;
+    els.extractNew.textContent = newKeys.length;
+    els.extractBanner.classList.remove('hidden');
+
+    // Update banner text for duplicates
+    if (skipped > 0) {
+      els.extractBanner.innerHTML = `<span class="extract-count">${keys.length}</span> keys found · <span class="extract-new">${newKeys.length}</span> new · ${skipped} rechecked`;
+    }
 
     els.emptyState.classList.add('hidden');
 
@@ -1417,8 +1451,8 @@
     renderAllCards();
     updateStats();
 
-    // Validate only new keys
-    await batchValidate(newKeys);
+    // Validate all keys (new + duplicates)
+    await batchValidate([...newKeys, ...duplicateKeys]);
 
     renderAllCards();
     updateStats();
