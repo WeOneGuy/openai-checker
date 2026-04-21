@@ -691,8 +691,8 @@
             return;
           }
 
-          // Pro failed with 429 — paid tier but rate limited
-          if (proResponse.status === 429) {
+          // Pro failed with 429 or quota exceeded — paid tier but rate limited or no quota
+          if (proResponse.status === 429 || proResponse.status === 403) {
             entry.responseTime = Date.now() - startTime;
             entry.status = 'valid';
             entry.type = 'gemini';
@@ -706,18 +706,25 @@
             try {
               const proBody = await proResponse.json();
               const errMsg = proBody?.error?.message || 'Rate limited';
-              entry.error = errMsg;
-              entry.errorFull = JSON.stringify(proBody, null, 2);
-              entry.headers = { ...headers, 'pro_access': 'rate-limited', 'pro_model': proModel };
+              // Check for quota exceeded - means valid key but no quota, still Paid tier
+              if (errMsg && errMsg.toLowerCase().includes('quota')) {
+                entry.error = errMsg;
+                entry.errorFull = JSON.stringify(proBody, null, 2);
+                entry.headers = { ...headers, 'pro_access': 'quota-exceeded', 'pro_model': proModel };
+              } else {
+                entry.error = errMsg;
+                entry.errorFull = JSON.stringify(proBody, null, 2);
+                entry.headers = { ...headers, 'pro_access': 'rate-limited', 'pro_model': proModel };
+              }
             } catch {
-              entry.error = 'Pro model rate limited (429)';
-              entry.errorFull = '429';
-              entry.headers = { ...headers, 'pro_access': 'rate-limited', 'pro_model': proModel };
+              entry.error = 'Pro model error';
+              entry.errorFull = String(proResponse.status);
+              entry.headers = { ...headers, 'pro_access': String(proResponse.status), 'pro_model': proModel };
             }
             return;
           }
 
-          // Pro failed with 403 — likely free tier (insufficient access)
+          // Pro failed with other error — likely free tier (insufficient access)
           headers['pro_error'] = `HTTP ${proResponse.status}`;
           headers['pro_status'] = String(proResponse.status);
         } catch {
@@ -763,8 +770,9 @@
             return;
           }
 
-          if (flashResponse.status === 429) {
-            entry.status = 'rate-limited';
+          if (flashResponse.status === 429 || flashResponse.status === 403) {
+            entry.responseTime = Date.now() - startTime;
+            entry.status = 'valid';
             entry.type = 'gemini';
             entry.tier = 'Free';
             entry.isFreeTier = true;
@@ -775,15 +783,24 @@
 
             try {
               const flashBody = await flashResponse.json();
-              const errMsg = flashBody?.error?.message || 'Model is temporarily overloaded';
-              const errFull = JSON.stringify(flashBody, null, 2);
-              entry.error = errMsg;
-              entry.errorFull = errFull;
-              entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': '429', 'flash_model': flashModel };
+              const errMsg = flashBody?.error?.message || 'Rate limited';
+              // Check for quota exceeded - key is valid Free tier but no quota
+              if (errMsg && errMsg.toLowerCase().includes('quota')) {
+                entry.status = 'valid';
+                entry.error = errMsg;
+                entry.errorFull = JSON.stringify(flashBody, null, 2);
+                entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status), 'flash_model': flashModel };
+              } else {
+                entry.status = 'rate-limited';
+                entry.error = errMsg;
+                entry.errorFull = JSON.stringify(flashBody, null, 2);
+                entry.headers = { ...headers, 'flash_error': errMsg, 'flash_status': String(flashResponse.status), 'flash_model': flashModel };
+              }
             } catch {
-              entry.error = 'Model is temporarily overloaded (429)';
-              entry.errorFull = '429 RESOURCE_EXHAUSTED';
-              entry.headers = { ...headers, 'flash_error': '429', 'flash_status': '429', 'flash_model': flashModel };
+              entry.status = 'rate-limited';
+              entry.error = flashResponse.status === 429 ? 'Model is temporarily overloaded' : 'Access denied';
+              entry.errorFull = String(flashResponse.status);
+              entry.headers = { ...headers, 'flash_error': String(flashResponse.status), 'flash_status': String(flashResponse.status), 'flash_model': flashModel };
             }
             return;
           }
