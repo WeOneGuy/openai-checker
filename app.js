@@ -125,6 +125,11 @@
       isFreeTier: k.isFreeTier,
       usage: k.usage,
       responseTime: k.responseTime,
+      orTotalCredits: k.orTotalCredits,
+      orTotalUsage: k.orTotalUsage,
+      orKeyLimit: k.orKeyLimit,
+      orKeyLimitRemaining: k.orKeyLimitRemaining,
+      orKeyUsageDaily: k.orKeyUsageDaily,
     }));
     localStorage.setItem(STORAGE_KEY, encrypt(JSON.stringify(data)));
   }
@@ -151,6 +156,11 @@
         isFreeTier: k.isFreeTier || false,
         usage: k.usage || 0,
         responseTime: k.responseTime || 0,
+        orTotalCredits: k.orTotalCredits !== undefined ? k.orTotalCredits : null,
+        orTotalUsage: k.orTotalUsage !== undefined ? k.orTotalUsage : null,
+        orKeyLimit: k.orKeyLimit !== undefined ? k.orKeyLimit : null,
+        orKeyLimitRemaining: k.orKeyLimitRemaining !== undefined ? k.orKeyLimitRemaining : null,
+        orKeyUsageDaily: k.orKeyUsageDaily !== undefined ? k.orKeyUsageDaily : null,
         headers: null,
         error: null,
         errorFull: null,
@@ -419,7 +429,6 @@
         entry.status = 'valid';
         entry.type = 'openrouter';
         entry.isFreeTier = data.is_free_tier || false;
-        entry.usage = data.usage || 0;
         entry.tier = data.is_free_tier ? 'Free' : 'Paid';
         entry.rpm = parseInt(headers['x-ratelimit-limit'], 10) || 0;
         entry.rpmRemaining = parseInt(headers['x-ratelimit-remaining'], 10) || 0;
@@ -430,18 +439,27 @@
         entry.error = null;
         entry.errorFull = null;
 
+        // Store /key endpoint data separately
+        entry.orKeyLimit = data.limit !== null && data.limit !== undefined ? data.limit : null;
+        entry.orKeyLimitRemaining = data.limit_remaining !== null && data.limit_remaining !== undefined ? data.limit_remaining : null;
+        entry.orKeyUsageDaily = data.usage_daily !== null && data.usage_daily !== undefined ? data.usage_daily : null;
+        entry.usage = data.usage || 0;
+
         // Store key info in headers for expandable details
         if (data.label) headers['label'] = data.label;
         if (data.limit !== null && data.limit !== undefined) headers['key_limit'] = String(data.limit);
         if (data.limit_remaining !== null && data.limit_remaining !== undefined) headers['key_limit_remaining'] = String(data.limit_remaining);
         if (data.usage !== null && data.usage !== undefined) headers['key_usage'] = String(data.usage);
+        if (data.usage_daily !== null && data.usage_daily !== undefined) headers['usage_daily'] = String(data.usage_daily);
+        if (data.usage_weekly !== null && data.usage_weekly !== undefined) headers['usage_weekly'] = String(data.usage_weekly);
+        if (data.usage_monthly !== null && data.usage_monthly !== undefined) headers['usage_monthly'] = String(data.usage_monthly);
         if (data.is_free_tier !== undefined) headers['is_free_tier'] = String(data.is_free_tier);
         if (data.rate_limit) {
           if (data.rate_limit.requests) headers['rate_limit_requests'] = String(data.rate_limit.requests);
           if (data.rate_limit.tokens) headers['rate_limit_tokens'] = String(data.rate_limit.tokens);
         }
 
-        // Now fetch credits endpoint for real balance
+        // Now fetch credits endpoint for account-wide balance
         try {
           const creditsResponse = await fetch(OPENROUTER_CREDITS_URL, {
             method: 'GET',
@@ -460,6 +478,8 @@
             const totalUsage = creditsData.total_usage || 0;
             const remaining = totalCredits - totalUsage;
 
+            entry.orTotalCredits = totalCredits;
+            entry.orTotalUsage = totalUsage;
             entry.balance = remaining;
             entry.balanceLimit = totalCredits;
             entry.usage = totalUsage;
@@ -470,17 +490,17 @@
             headers['balance_remaining'] = String(remaining);
           } else {
             // Credits endpoint failed, fall back to /key endpoint data
-            entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
-              ? data.limit_remaining : null;
-            entry.balanceLimit = data.limit !== null && data.limit !== undefined
-              ? data.limit : null;
+            entry.orTotalCredits = null;
+            entry.orTotalUsage = null;
+            entry.balance = entry.orKeyLimitRemaining;
+            entry.balanceLimit = entry.orKeyLimit;
           }
         } catch {
           // Credits fetch failed (network/CORS), fall back to /key endpoint data
-          entry.balance = data.limit_remaining !== null && data.limit_remaining !== undefined
-            ? data.limit_remaining : null;
-          entry.balanceLimit = data.limit !== null && data.limit !== undefined
-            ? data.limit : null;
+          entry.orTotalCredits = null;
+          entry.orTotalUsage = null;
+          entry.balance = entry.orKeyLimitRemaining;
+          entry.balanceLimit = entry.orKeyLimit;
         }
       } else if (response.status === 401 || response.status === 403) {
         entry.status = 'invalid';
@@ -1069,21 +1089,38 @@
       ? `<div class="limit-item"><span class="limit-value">${entry.responseTime}ms</span><span class="limit-label">Time</span></div>`
       : '';
 
-    // Balance display for OpenRouter keys — show remaining balance and total limit
-    let balanceHtml = '';
-    if (entry.type === 'openrouter' && entry.balance !== null && entry.balance !== undefined) {
-      const remaining = formatBalance(entry.balance);
-      const limitStr = entry.balanceLimit !== null && entry.balanceLimit !== undefined
-        ? formatBalance(entry.balanceLimit)
-        : null;
+    // Balance display for OpenRouter keys — account credits from /credits and key limit from /key
+    let creditsHtml = '';
+    let keyLimitHtml = '';
+    let keyDailyHtml = '';
 
-      // Show: $remaining / $limit (this IS the balance)
-      let balDisplay = `$${remaining}`;
-      if (limitStr) balDisplay += ` / $${limitStr}`;
-      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">${balDisplay}</span><span class="limit-label">Balance</span></div>`;
-    } else if (entry.type === 'openrouter' && entry.balance === null && entry.status === 'valid') {
-      // null limit_remaining means unlimited
-      balanceHtml = `<div class="limit-item balance-item"><span class="limit-value">∞</span><span class="limit-label">Balance</span></div>`;
+    if (entry.type === 'openrouter') {
+      // Account-wide credits (/api/v1/credits): total_credits - total_usage = remaining
+      if (entry.orTotalCredits !== null && entry.orTotalCredits !== undefined) {
+        const remaining = entry.orTotalCredits - (entry.orTotalUsage || 0);
+        const remStr = formatBalance(remaining);
+        const totalStr = formatBalance(entry.orTotalCredits);
+        creditsHtml = `<div class="limit-item balance-item"><span class="limit-value">$${remStr} / $${totalStr}</span><span class="limit-label">Credits</span></div>`;
+      }
+
+      // Key limit (/api/v1/key): limit_remaining out of limit
+      if (entry.orKeyLimitRemaining !== null && entry.orKeyLimitRemaining !== undefined) {
+        const remStr = formatBalance(entry.orKeyLimitRemaining);
+        const limitStr = entry.orKeyLimit !== null && entry.orKeyLimit !== undefined
+          ? formatBalance(entry.orKeyLimit)
+          : null;
+        let display = `$${remStr}`;
+        if (limitStr) display += ` / $${limitStr}`;
+        keyLimitHtml = `<div class="limit-item"><span class="limit-value">${display}</span><span class="limit-label">Key Limit</span></div>`;
+      } else if (entry.orKeyLimit === null && entry.status === 'valid') {
+        // No key limit set = unlimited
+        keyLimitHtml = `<div class="limit-item"><span class="limit-value">∞</span><span class="limit-label">Key Limit</span></div>`;
+      }
+
+      // Daily usage from /key
+      if (entry.orKeyUsageDaily !== null && entry.orKeyUsageDaily !== undefined) {
+        keyDailyHtml = `<div class="limit-item"><span class="limit-value">$${formatBalance(entry.orKeyUsageDaily)}</span><span class="limit-label">Today Used</span></div>`;
+      }
     }
 
     // Limits: for OpenRouter show balance + RPM, for Gemini show tier info, for OpenAI show RPM/TPM/Rem
@@ -1095,7 +1132,7 @@
       const rpmRemHtml = entry.rpmRemaining
         ? `<div class="limit-item"><span class="limit-value">${formatNum(entry.rpmRemaining)}</span><span class="limit-label">Rem Req</span></div>`
         : '';
-      const limitItems = [balanceHtml, rpmHtml, rpmRemHtml, timeHtml].filter(Boolean);
+      const limitItems = [creditsHtml, keyLimitHtml, keyDailyHtml, rpmHtml, rpmRemHtml, timeHtml].filter(Boolean);
       if (limitItems.length) {
         limitsHtml = `<div class="limits">${limitItems.join('')}</div>`;
       }
